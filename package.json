@@ -1,0 +1,23 @@
+{
+  "name": "seo-agent",
+  "version": "1.0.0",
+  "description": "An automated, Cloudflare-based SEO agent for large content sites.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Alan Wizemann",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/awizemann/seo-agent.git"
+  },
+  "scripts": {
+    "types": "wrangler types worker-configuration.d.ts",
+    "check": "npm run types && tsc",
+    "dev": "wrangler dev",
+    "deploy": "npm run check && wrangler deploy",
+    "db:init": "wrangler d1 execute seo-agent-db --remote --file schema.sql"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "wrangler": "^4.45.4"
+  }
+}

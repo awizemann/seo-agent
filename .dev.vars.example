@@ -1,0 +1,11 @@
+# Local-dev secrets for `wrangler dev`. Copy to .dev.vars (gitignored) and fill in.
+# Production values are set with `wrangler secret put <NAME>` instead.
+
+# Bearer token for the control API, MCP endpoint, and dashboard login.
+# Generate one: openssl rand -hex 32
+AGENT_TOKEN=
+
+# Optional. Google service-account key JSON (one line) for Search Console
+# sensing. Leave empty to run without GSC — the agent still crawls, finds, and
+# drafts; it just has no search-performance data. See the README.
+GSC_SERVICE_ACCOUNT_JSON=

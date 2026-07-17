@@ -1,0 +1,71 @@
+{
+  // Copy this file to wrangler.jsonc and fill in your account-specific values.
+  // wrangler.jsonc is gitignored so your ids stay out of version control.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "seo-agent",
+  "main": "./src/index.ts",
+  "compatibility_date": "2025-06-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "upload_source_maps": true,
+
+  // Daily crawl. Pick a time shortly after your content publishes so newly-live
+  // pages are onboarded the same run (cron is UTC).
+  "triggers": { "crons": ["17 6 * * *"] },
+
+  // Create with: wrangler d1 create seo-agent-db  → paste the database_id.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "seo-agent-db",
+      "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+    }
+  ],
+
+  // Create with: wrangler kv namespace create SEO_OVERRIDES  → paste the id.
+  // Bind this SAME namespace in your site's injector so approved overrides apply.
+  "kv_namespaces": [
+    {
+      "binding": "OVERRIDES",
+      "id": "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+    }
+  ],
+
+  "ai": { "binding": "AI" },
+
+  "vars": {
+    // --- required ---
+    "SITE_URL": "https://example.com",
+
+    // --- site profile (optional; sensible fallbacks derived from SITE_URL) ---
+    "SITE_NAME": "Example",
+    "SITE_DESCRIPTION": "a description of the site, woven into the AI drafting prompt",
+
+    // --- Google Search Console (optional; sensing is dormant without the SA secret) ---
+    // Domain property: "sc-domain:example.com". URL-prefix property: the full URL.
+    "GSC_PROPERTY": "sc-domain:example.com",
+
+    // --- model + policy ---
+    "AI_MODEL": "@cf/zai-org/glm-4.7-flash",
+    // Comma-separated fields that may apply WITHOUT approval (e.g. "description").
+    // Empty = every proposal requires explicit approval (recommended to start).
+    "AUTO_APPLY_FIELDS": "",
+    "MAX_PROPOSALS_PER_RUN": "8",
+
+    // --- title heuristics (optional; leave "" to disable) ---
+    // Brand suffix your injector appends to <title>, e.g. " | Example".
+    "TITLE_BRAND_SUFFIX": "",
+    // Your SPA shell's static <title>, used to detect injection regressions.
+    "SHELL_TITLE": "",
+
+    // --- richer drafting context (optional; both required to enable) ---
+    // Content detail-page prefix, e.g. "/articles/" or "/blog/".
+    "ARTICLE_PATH_PREFIX": "",
+    // JSON endpoint template with {slug} returning { excerpt?, content? }.
+    "ARTICLE_API_TEMPLATE": ""
+  }
+
+  // Secrets (wrangler secret put <NAME>):
+  //   AGENT_TOKEN               — required; gates the API, MCP, and dashboard
+  //   GSC_SERVICE_ACCOUNT_JSON  — optional; enables Search Console ingestion
+}
