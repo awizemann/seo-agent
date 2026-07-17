@@ -1,12 +1,12 @@
--- seo-agent D1 schema. Apply with:
---   npx wrangler d1 execute seo-agent-db --remote --file seo-agent/schema.sql -c seo-agent/wrangler.jsonc
+-- seo-agent D1 schema. Apply with: npm run db:init
 
 CREATE TABLE IF NOT EXISTS crawl_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   started_at TEXT NOT NULL,
-  finished_at TEXT,
+  finished_at TEXT,                -- set when the crawl phase completes
   url_count INTEGER,
-  ok INTEGER DEFAULT 0
+  ok INTEGER DEFAULT 0,            -- 1 when the crawl succeeded (baseline-eligible)
+  pipeline_done INTEGER DEFAULT 0  -- 1 when the WHOLE run (rules+proposals+gsc) finished; drives the in-progress guard
 );
 
 CREATE TABLE IF NOT EXISTS page_snapshots (

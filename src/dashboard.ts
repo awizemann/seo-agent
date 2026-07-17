@@ -263,12 +263,34 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
       toast('Change #' + id + ' reverted'); load();
     }).catch(function (e) { toast(e.message); });
   }
+  function resetRunBtn() { var b = el('runbtn'); b.disabled = false; b.textContent = 'Run pipeline'; }
   function runPipeline() {
     var b = el('runbtn'); b.disabled = true; b.innerHTML = '<span class="spin"></span> Running';
+    // /run fires the pipeline in the background and returns immediately; poll
+    // /status until nothing is running and the latest run is fully done.
     api('/run', { method: 'POST' }).then(function (r) {
-      toast('Run #' + r.runId + ': ' + r.urls + ' URLs, ' + r.proposals.created + ' new proposals');
-      load();
-    }).catch(function (e) { toast(e.message); }).then(function () { b.disabled = false; b.textContent = 'Run pipeline'; });
+      toast(r.started ? 'Run started…' : 'A run is already in progress…');
+      pollRun(0);
+    }).catch(function (e) { resetRunBtn(); toast(e.message); });
+  }
+  function pollRun(tries) {
+    if (tries > 80) { resetRunBtn(); toast('Still running — refreshing.'); load(); return; }
+    setTimeout(function () {
+      api('/status').then(function (s) {
+        if (!s.running && s.lastRun && s.lastRun.pipeline_done) {
+          resetRunBtn();
+          toast('Run #' + s.lastRun.id + ' complete — drafting proposals…');
+          // Drafts are produced asynchronously by the queue after the run
+          // finishes; refresh a few times to surface them as they land.
+          load();
+          setTimeout(load, 8000);
+          setTimeout(load, 20000);
+          setTimeout(load, 35000);
+        } else {
+          pollRun(tries + 1);
+        }
+      }).catch(function () { pollRun(tries + 1); });
+    }, 3000);
   }
   var lastDraft = null;
   function dryRun() {

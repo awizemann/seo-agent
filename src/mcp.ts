@@ -12,7 +12,7 @@
 
 import {
   ApiError,
-  runPipeline,
+  startRun,
   statusData,
   listFindings,
   listProposals,
@@ -32,7 +32,7 @@ type Tool = {
   name: string;
   description: string;
   inputSchema: { type: 'object'; properties: Record<string, unknown>; required?: string[] };
-  handler: (env: Env, args: Record<string, any>) => Promise<unknown>;
+  handler: (env: Env, args: Record<string, any>, ctx: ExecutionContext) => Promise<unknown>;
 };
 
 const TOOLS: Tool[] = [
@@ -46,9 +46,9 @@ const TOOLS: Tool[] = [
   {
     name: 'run_pipeline',
     description:
-      'Run the full pipeline now: sitemap self-crawl → rules → AI proposals → GSC ingest. Takes ~60–90s. Returns run summary with counts.',
+      'Start a pipeline run (sitemap self-crawl → rules → enqueue drafting jobs → GSC ingest) in the background and return immediately. Returns {started, running} — started=false means a run was already in progress. Poll seo_status until running=false and lastRun.pipeline_done=1 (usually well under a minute). Meta-description drafts are produced asynchronously by a queue over the following ~1–2 min, so call list_proposals a little after the run completes to see them.',
     inputSchema: { type: 'object', properties: {} },
-    handler: (env) => runPipeline(env),
+    handler: (env, _a, ctx) => startRun(env, (p) => ctx.waitUntil(p)),
   },
   {
     name: 'list_findings',
@@ -133,7 +133,7 @@ const rpcResult = (id: unknown, result: unknown): Response =>
 const rpcError = (id: unknown, code: number, message: string, status = 200): Response =>
   Response.json({ jsonrpc: '2.0', id: id ?? null, error: { code, message } }, { status });
 
-export async function handleMcp(request: Request, env: Env): Promise<Response> {
+export async function handleMcp(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   // DNS-rebinding protection (spec MUST): browser-originated cross-site
   // requests carry an Origin header; API clients (Claude Code, curl) do not.
   const origin = request.headers.get('origin');
@@ -194,7 +194,7 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
         const tool = TOOLS.find((t) => t.name === params?.name);
         if (!tool) return rpcError(id, -32602, `Unknown tool: ${params?.name}`);
         try {
-          const result = await tool.handler(env, params?.arguments ?? {});
+          const result = await tool.handler(env, params?.arguments ?? {}, ctx);
           return rpcResult(id, { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] });
         } catch (err) {
           // Tool-level failures are results with isError, not protocol errors.

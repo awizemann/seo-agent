@@ -27,9 +27,13 @@ Daily cron (and `POST /run` on demand):
    lifecycle: injection regressions, missing/short/long descriptions, canonical
    mismatches, sitemap URLs that error or redirect, duplicate titles, missing Article
    JSON-LD, noindex-in-sitemap, long titles, new/removed pages.
-3. **Generate** — description-quality findings feed Workers AI. Output is validated
-   hard (length window, complete sentence, no quotes), retried once with feedback,
-   dropped if still invalid. Capped per run (`MAX_PROPOSALS_PER_RUN`).
+3. **Generate** — a run *enqueues* one drafting job per description-quality finding
+   (capped at `MAX_PROPOSALS_PER_RUN`) and returns immediately; a **queue consumer**
+   drafts them one at a time with Workers AI. Keeping drafting off the request path
+   means a slow or variable model call is isolated to its own message (and retried by
+   the queue) instead of stalling the run or blowing an invocation budget. Output is
+   validated hard (length window, complete sentence, no quotes); invalid drafts are
+   dropped and the finding re-enqueues next run.
 4. **Act** — approved proposals become KV overrides (`override:<path>` →
    `{"description": "...", "title": "..."}`) that the site's injector merges over its
    computed meta. Live within the injector's KV cache TTL. Nothing auto-applies unless
@@ -52,6 +56,7 @@ npm install
 # 2. Create the Cloudflare resources
 npx wrangler d1 create seo-agent-db
 npx wrangler kv namespace create SEO_OVERRIDES
+npx wrangler queues create seo-agent-drafts
 
 # 3. Configure — copy the template and fill in your ids + site profile
 cp wrangler.example.jsonc wrangler.jsonc     # gitignored; paste the D1 + KV ids, set SITE_URL etc.

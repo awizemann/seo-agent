@@ -13,7 +13,7 @@
 
 import {
   ApiError,
-  runPipeline,
+  startRun,
   statusData,
   listFindings,
   listProposals,
@@ -24,7 +24,7 @@ import {
   revertById,
   listOverrides,
 } from './actions.js';
-import { invalidReason } from './propose.js';
+import { invalidReason, draftAndCreate, type DraftJob } from './propose.js';
 import { handleMcp } from './mcp.js';
 import { DASHBOARD_HTML } from './dashboard.js';
 
@@ -42,7 +42,7 @@ async function authorized(request: Request, env: Env): Promise<boolean> {
 }
 
 export default {
-  async fetch(request, env): Promise<Response> {
+  async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
     const { pathname } = url;
     const method = request.method;
@@ -61,11 +61,18 @@ export default {
     // Everything else (REST + MCP) requires the bearer token.
     if (!(await authorized(request, env))) return json({ error: 'unauthorized' }, 401);
 
-    if (pathname === '/mcp') return handleMcp(request, env);
+    if (pathname === '/mcp') return handleMcp(request, env, ctx);
 
     try {
       if (method === 'GET' && pathname === '/status') return json(await statusData(env));
-      if (method === 'POST' && pathname === '/run') return json(await runPipeline(env));
+      // Fire-and-return: the pipeline (crawl + AI drafting) can run well past a
+      // normal request timeout, so start it in the background and let the client
+      // poll /status for `running=false` + a new lastRun. 202 = started here,
+      // 409 = a run was already in progress.
+      if (method === 'POST' && pathname === '/run') {
+        const r = await startRun(env, (p) => ctx.waitUntil(p));
+        return json(r, r.started ? 202 : 409);
+      }
       if (method === 'GET' && pathname === '/findings') return json(await listFindings(env, url.searchParams.get('status') || 'open'));
       if (method === 'GET' && pathname === '/proposals') return json(await listProposals(env, url.searchParams.get('status') || 'proposed'));
 
@@ -106,13 +113,23 @@ export default {
     }
   },
 
-  async scheduled(controller, env, ctx): Promise<void> {
-    ctx.waitUntil(
-      runPipeline(env)
-        .then((result) => console.log(JSON.stringify({ evt: 'cron_complete', ...result })))
-        .catch((err) =>
-          console.error(JSON.stringify({ evt: 'cron_error', error: err instanceof Error ? err.message : String(err) }))
-        )
-    );
+  async scheduled(_controller, env, ctx): Promise<void> {
+    // Same start path as the API: skips if a manual run is already in progress.
+    await startRun(env, (p) => ctx.waitUntil(p));
   },
-} satisfies ExportedHandler<Env>;
+
+  // Queue consumer (max_batch_size 1): draft one proposal per invocation, so a
+  // slow/variable Workers AI call is isolated to its own message. A throw
+  // retries the message (up to max_retries); success/no-op acks it.
+  async queue(batch, env): Promise<void> {
+    for (const msg of batch.messages) {
+      try {
+        await draftAndCreate(env, msg.body);
+        msg.ack();
+      } catch (err) {
+        console.error(JSON.stringify({ evt: 'draft_job_error', path: msg.body?.path, error: err instanceof Error ? err.message : String(err) }));
+        msg.retry();
+      }
+    }
+  },
+} satisfies ExportedHandler<Env, DraftJob>;

@@ -19,10 +19,12 @@ interface TextGenAi {
   run(model: string, inputs: { messages: Array<{ role: string; content: string }>; max_tokens?: number }): Promise<unknown>;
 }
 
-const AI_CALL_TIMEOUT_MS = 30_000;
+// Generous: drafting runs one-per-invocation on the queue, so a slow model
+// call only affects its own message (which the queue will retry). The bound is
+// a backstop against a genuinely hung call, with headroom for a reasoning model.
+const AI_CALL_TIMEOUT_MS = 45_000;
 
-// A single hung/rate-limited model call must not stall the whole run until the
-// (scheduled) invocation is killed — which loses the entire batch. Bound it.
+// A single hung/rate-limited model call must not stall a draft indefinitely.
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('ai.run timeout')), ms);
@@ -138,9 +140,24 @@ async function draft(env: Env, input: { path: string; title: string | null; curr
   return value;
 }
 
-export async function generateProposals(env: Env, runId: number): Promise<{ created: number; autoApplied: number }> {
+// One drafting job — enqueued by a run, drafted by the queue consumer.
+export type DraftJob = {
+  findingId: number;
+  path: string;
+  rule: string;
+  title: string | null;
+  current: string | null;
+};
+
+/**
+ * Find this run's description candidates and enqueue one drafting job each.
+ * Fast (no AI in the request path) — the actual drafting happens in the queue
+ * consumer, one proposal per invocation, so a slow/variable model call can
+ * never stall the run or exceed an invocation budget.
+ */
+export async function enqueueCandidates(env: Env, runId: number): Promise<{ enqueued: number }> {
   const max = Math.max(0, parseInt(env.MAX_PROPOSALS_PER_RUN, 10) || 0);
-  if (max === 0) return { created: 0, autoApplied: 0 };
+  if (max === 0) return { enqueued: 0 };
 
   const candidates = (
     await env.DB.prepare(
@@ -160,42 +177,47 @@ export async function generateProposals(env: Env, runId: number): Promise<{ crea
       .all<{ finding_id: number; path: string; rule: string; title: string | null; description: string | null }>()
   ).results;
 
-  const autoFields = new Set(
-    env.AUTO_APPLY_FIELDS.split(',').map((f) => f.trim()).filter(Boolean)
-  );
+  const jobs = candidates
+    .filter((c) => PROPOSABLE_RULES.has(c.rule))
+    .map((c) => ({ findingId: c.finding_id, path: c.path, rule: c.rule, title: c.title, current: c.description }));
+  for (const job of jobs) await env.DRAFT_QUEUE.send(job);
+
+  console.log(JSON.stringify({ evt: 'candidates_enqueued', runId, enqueued: jobs.length }));
+  return { enqueued: jobs.length };
+}
+
+/**
+ * Draft one proposal for a queued job and persist it (auto-applying if the
+ * field is opted in). Runs in the queue consumer. Throwing signals the queue
+ * to retry the message; returning (even with no proposal) acks it.
+ */
+export async function draftAndCreate(env: Env, job: DraftJob): Promise<void> {
+  // Idempotency: another run/attempt may have already produced a proposal for
+  // this page — skip so retries and overlapping runs can't create duplicates.
+  const existing = await env.DB.prepare(
+    "SELECT 1 FROM proposals WHERE path = ? AND field = 'description' AND status IN ('proposed', 'approved') LIMIT 1"
+  )
+    .bind(job.path)
+    .first();
+  if (existing) return;
+
+  const value = await draft(env, { path: job.path, title: job.title, current: job.current });
+  if (!value) return; // invalid after retries — drop; the open finding re-enqueues next run
+
   const now = new Date().toISOString();
-  let created = 0;
-  let autoApplied = 0;
+  const proposal = await env.DB.prepare(
+    `INSERT INTO proposals (created_at, finding_id, path, field, current_value, proposed_value, rationale, model)
+     VALUES (?, ?, ?, 'description', ?, ?, ?, ?) RETURNING id`
+  )
+    .bind(now, job.findingId, job.path, job.current, value, job.rule, env.AI_MODEL)
+    .first<{ id: number }>();
 
-  for (const c of candidates) {
-    if (!PROPOSABLE_RULES.has(c.rule)) continue;
-    const value = await draft(env, { path: c.path, title: c.title, current: c.description });
-    if (!value) continue;
-
-    const proposal = await env.DB.prepare(
-      `INSERT INTO proposals (created_at, finding_id, path, field, current_value, proposed_value, rationale, model)
-       VALUES (?, ?, ?, 'description', ?, ?, ?, ?) RETURNING id`
-    )
-      .bind(now, c.finding_id, c.path, c.description, value, c.rule, env.AI_MODEL)
-      .first<{ id: number }>();
-    created++;
-
-    if (proposal && autoFields.has('description')) {
-      await applyOverride(env, {
-        path: c.path,
-        field: 'description',
-        value,
-        oldValue: c.description,
-        source: 'auto',
-        proposalId: proposal.id,
-      });
-      await env.DB.prepare("UPDATE proposals SET status = 'approved', decided_at = ?, applied_at = ? WHERE id = ?")
-        .bind(now, now, proposal.id)
-        .run();
-      autoApplied++;
-    }
+  const autoFields = new Set(env.AUTO_APPLY_FIELDS.split(',').map((f) => f.trim()).filter(Boolean));
+  if (proposal && autoFields.has('description')) {
+    await applyOverride(env, { path: job.path, field: 'description', value, oldValue: job.current, source: 'auto', proposalId: proposal.id });
+    await env.DB.prepare("UPDATE proposals SET status = 'approved', decided_at = ?, applied_at = ? WHERE id = ?")
+      .bind(now, now, proposal.id)
+      .run();
   }
-
-  console.log(JSON.stringify({ evt: 'proposals_complete', runId, created, autoApplied }));
-  return { created, autoApplied };
+  console.log(JSON.stringify({ evt: 'proposal_created', path: job.path, id: proposal?.id, autoApplied: autoFields.has('description') }));
 }

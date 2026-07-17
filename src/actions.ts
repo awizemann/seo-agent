@@ -6,7 +6,7 @@
 
 import { runCrawl } from './crawl.js';
 import { runRules } from './rules.js';
-import { generateProposals, draftWithTrace } from './propose.js';
+import { enqueueCandidates, draftWithTrace } from './propose.js';
 import { ingestGsc } from './gsc.js';
 import { applyOverride, revertChange } from './overrides.js';
 
@@ -19,42 +19,80 @@ export class ApiError extends Error {
   }
 }
 
+// A run is "in progress" while its crawl_runs row has pipeline_done = 0 and is
+// recent. The recency cutoff means a crashed run (which never marks itself done)
+// stops blocking new runs after 15 minutes instead of wedging forever.
+const IN_PROGRESS_WINDOW_MS = 15 * 60 * 1000;
+
+export async function isRunning(env: Env): Promise<boolean> {
+  const cutoff = new Date(Date.now() - IN_PROGRESS_WINDOW_MS).toISOString();
+  const row = await env.DB.prepare(
+    'SELECT id FROM crawl_runs WHERE pipeline_done = 0 AND started_at > ? ORDER BY id DESC LIMIT 1'
+  )
+    .bind(cutoff)
+    .first();
+  return !!row;
+}
+
+/**
+ * Start the pipeline in the background and return immediately. The caller's
+ * `waitUntil` keeps the Worker alive until the run finishes; the dashboard/MCP
+ * poll statusData() for `running=false` + a new lastRun. Refuses to start a
+ * second concurrent run (the button double-click / cron overlap guard).
+ */
+export async function startRun(env: Env, waitUntil: (p: Promise<unknown>) => void): Promise<{ started: boolean; running: boolean }> {
+  if (await isRunning(env)) return { started: false, running: true };
+  waitUntil(
+    runPipeline(env)
+      .then((r) => console.log(JSON.stringify({ evt: 'run_complete', ...r })))
+      .catch((err) => console.error(JSON.stringify({ evt: 'run_error', error: err instanceof Error ? err.message : String(err) })))
+  );
+  return { started: true, running: true };
+}
+
 export async function runPipeline(env: Env) {
   const { runId, snapshots } = await runCrawl(env);
-  const rules = await runRules(env, runId, snapshots);
-
-  // Each stage is isolated: a failure in AI drafting (a hung/rate-limited model
-  // call) or GSC must never discard the crawl+rules that already succeeded, and
-  // must never take down the daily cron. Proposals commit one at a time, so a
-  // mid-batch failure still persists everything drafted before it.
-  let proposals;
   try {
-    proposals = await generateProposals(env, runId);
-  } catch (err) {
-    console.error(JSON.stringify({ evt: 'proposals_error', error: err instanceof Error ? err.message : String(err) }));
-    proposals = { created: 0, autoApplied: 0, error: err instanceof Error ? err.message : String(err) };
-  }
+    const rules = await runRules(env, runId, snapshots);
 
-  let gsc;
-  try {
-    gsc = await ingestGsc(env);
-  } catch (err) {
-    console.error(JSON.stringify({ evt: 'gsc_ingest_error', error: err instanceof Error ? err.message : String(err) }));
-    gsc = { error: err instanceof Error ? err.message : String(err) };
+    // Drafting is off the critical path: enqueue one job per candidate and let
+    // the queue consumer draft them one at a time. A failure here (or in a
+    // single draft later) can't discard the crawl+rules or stall the run.
+    let proposals;
+    try {
+      proposals = await enqueueCandidates(env, runId);
+    } catch (err) {
+      console.error(JSON.stringify({ evt: 'enqueue_error', error: err instanceof Error ? err.message : String(err) }));
+      proposals = { enqueued: 0, error: err instanceof Error ? err.message : String(err) };
+    }
+
+    let gsc;
+    try {
+      gsc = await ingestGsc(env);
+    } catch (err) {
+      console.error(JSON.stringify({ evt: 'gsc_ingest_error', error: err instanceof Error ? err.message : String(err) }));
+      gsc = { error: err instanceof Error ? err.message : String(err) };
+    }
+    return { runId, urls: snapshots.length, rules, proposals, gsc };
+  } finally {
+    // Mark the run finished whether the post-crawl stages succeeded or not, so
+    // it stops reading as "in progress" the moment real work is done.
+    await env.DB.prepare('UPDATE crawl_runs SET pipeline_done = 1 WHERE id = ?').bind(runId).run();
   }
-  return { runId, urls: snapshots.length, rules, proposals, gsc };
 }
 
 export async function statusData(env: Env) {
-  const [lastRun, findings, proposals, changes, gscRows] = await Promise.all([
-    env.DB.prepare('SELECT id, started_at, finished_at, url_count, ok FROM crawl_runs ORDER BY id DESC LIMIT 1').first(),
+  const [lastRun, findings, proposals, changes, gscRows, running] = await Promise.all([
+    env.DB.prepare('SELECT id, started_at, finished_at, url_count, ok, pipeline_done FROM crawl_runs ORDER BY id DESC LIMIT 1').first(),
     env.DB.prepare("SELECT severity, COUNT(*) AS n FROM findings WHERE status = 'open' GROUP BY severity").all(),
     env.DB.prepare('SELECT status, COUNT(*) AS n FROM proposals GROUP BY status').all(),
     env.DB.prepare('SELECT COUNT(*) AS applied, SUM(CASE WHEN reverted_at IS NOT NULL THEN 1 ELSE 0 END) AS reverted FROM changes').first(),
     env.DB.prepare('SELECT COUNT(*) AS n, MAX(date) AS latest FROM gsc_daily').first(),
+    isRunning(env),
   ]);
   return {
     lastRun,
+    running,
     openFindingsBySeverity: findings.results,
     proposalsByStatus: proposals.results,
     changes,

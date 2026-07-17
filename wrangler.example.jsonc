@@ -33,6 +33,14 @@
 
   "ai": { "binding": "AI" },
 
+  // Create with: wrangler queues create seo-agent-drafts
+  // Drafting runs on this queue (one proposal per consumer invocation), so a
+  // slow/variable Workers AI call never stalls a run or blows an invocation budget.
+  "queues": {
+    "producers": [{ "binding": "DRAFT_QUEUE", "queue": "seo-agent-drafts" }],
+    "consumers": [{ "queue": "seo-agent-drafts", "max_batch_size": 1, "max_batch_timeout": 5, "max_retries": 3 }]
+  },
+
   "vars": {
     // --- required ---
     "SITE_URL": "https://example.com",
