@@ -84,6 +84,55 @@ curl -X POST -H "Authorization: Bearer $TOKEN" https://seo-agent.<your-subdomain
 Then open `https://seo-agent.<your-subdomain>.workers.dev/` in a browser, paste the
 token, and review what it found.
 
+### Set up with a coding agent
+
+Using Claude Code (or any coding agent with shell + wrangler access)? Paste this
+prompt, answer its three questions, and a working setup lands in about ten minutes:
+
+```text
+Set up https://github.com/awizemann/seo-agent as the SEO/AEO agent for my site.
+
+Ask me these three things before you start (don't guess):
+1. SITE_URL — the site to manage. It must serve a sitemap.xml.
+2. How the site is fronted: (a) a Cloudflare Worker I can add middleware to, or
+   (b) a static/other origin behind Cloudflare — then use the ready-made proxy
+   injector in injector/ on a route in front of it.
+3. Which optional senses to enable now: Google Search Console (I'd need to
+   provide a service-account JSON), AI-traffic telemetry (bind the agent's D1
+   into my injector/Worker), citation probes (CITATION_QUERIES plus at least
+   one engine key — note Gemini grounding needs a billing-linked Google
+   project; unbilled keys get instant 429s).
+
+Then, with wrangler against my Cloudflare account:
+1. Clone the repo and npm install.
+2. Create the resources: wrangler d1 create seo-agent-db, wrangler kv namespace
+   create SEO_OVERRIDES, wrangler queues create seo-agent-drafts.
+3. cp wrangler.example.jsonc wrangler.jsonc and fill in the resource ids and my
+   site profile (SITE_URL is required; the comments explain every var; leave a
+   feature var "" to keep that feature off). cp .dev.vars.example .dev.vars.
+4. npm run db:init to apply schema.sql.
+5. openssl rand -hex 32, store it with wrangler secret put AGENT_TOKEN, and
+   give it to me for the dashboard/MCP.
+6. npm run deploy, then POST /run with the bearer and poll /status until the
+   first pipeline run completes.
+7. Wire the injector side per the README's "Connecting your site": merge the KV
+   overrides in my existing Worker, or configure injector/wrangler.jsonc from
+   its example and deploy it — ask me before putting anything on a route in
+   front of my live site.
+8. Verify end-to-end and show me: the /status output, open findings, the
+   dashboard URL, and the MCP connect command
+   (claude mcp add --transport http seo-agent https://<worker-host>/mcp
+    --header "Authorization: Bearer <token>").
+
+Safety rails: never commit wrangler.jsonc, .dev.vars, or any secret; ask before
+changing anything that serves my live site; leave AUTO_APPLY_FIELDS empty so
+nothing ever changes the site without my approval.
+```
+
+The repo is built for this: one config file with annotated vars, idempotent
+schema, no migrations, and every feature dormant until its var/secret exists —
+an agent can't half-configure it into a broken state.
+
 ### Connecting your site (the injector side)
 
 The agent applies changes by writing to KV; your injector reads them. Bind the **same
