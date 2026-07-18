@@ -1,0 +1,23 @@
+{
+  // Copy to wrangler.jsonc and fill in. Deploy this Worker on a route in FRONT
+  // of the site you want the seo-agent to optimize (a static Pages site, an S3
+  // origin, etc. — anything behind Cloudflare you can't add middleware to).
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "seo-injector",
+  "main": "./src/index.ts",
+  "compatibility_date": "2025-06-17",
+  "observability": { "enabled": true },
+
+  // The hostname to front. The Worker intercepts these requests, proxies them
+  // to ORIGIN_HOST, and patches the <head> when an override exists.
+  "routes": [{ "pattern": "www.example.com/*", "zone_name": "example.com" }],
+
+  // The SAME KV namespace your seo-agent writes overrides to.
+  "kv_namespaces": [{ "binding": "SEO_OVERRIDES", "id": "REPLACE_WITH_YOUR_KV_NAMESPACE_ID" }],
+
+  "vars": {
+    // Origin to proxy to — where the real content is served from. Must be a
+    // DIFFERENT host than the route above (no proxy loop).
+    "ORIGIN_HOST": "example-origin.pages.dev"
+  }
+}

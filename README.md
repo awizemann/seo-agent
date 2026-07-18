@@ -100,6 +100,14 @@ if (raw) {
 }
 ```
 
+**No Worker on your origin?** (a static Pages site, an S3 bucket, any origin behind
+Cloudflare you can't add middleware to.) Use the ready-made **proxy injector** in
+[`injector/`](injector/) — a standalone Worker you deploy on a route in *front* of
+the site. It proxies every request to your origin and merges the same KV overrides
+into HTML responses with HTMLRewriter, fail-open, no origin changes. Copy
+`injector/wrangler.example.jsonc` → `wrangler.jsonc`, set the route, `ORIGIN_HOST`,
+and the shared `SEO_OVERRIDES` namespace, then `wrangler deploy -c injector/wrangler.jsonc`.
+
 ## Google Search Console sensing (optional but recommended)
 
 Cloudflare sees traffic after the click; only Search Console knows impressions,
