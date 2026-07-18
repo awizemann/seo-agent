@@ -83,7 +83,8 @@
     // --- citation probes (optional; see README "Citation probes") ---
     // The queries you want AI engines to cite you for: a JSON array, or
     // |-separated text. Empty = probes off. Needs at least one engine key
-    // (secrets below) — GEMINI_API_KEY's free grounding tier costs $0.
+    // (secrets below). Gemini grounding needs a BILLING-LINKED Google project
+    // (unbilled keys 429); at this volume the cost is ~$0 either way.
     "CITATION_QUERIES": "",
     // UTC weekday the daily cron probes on (0=Sun … 6=Sat). Default Monday.
     "CITATION_CRON_DAY": "1"

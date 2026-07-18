@@ -310,10 +310,13 @@ crawlers don't run JavaScript. The telemetry tap records it at the edge instead:
 The outcome metric: do the engines **cite you** for the queries you care about?
 
 - **Configure:** set `CITATION_QUERIES` (a JSON array or `|`-separated list of
-  10–30 queries) and at least one engine key. **Free-first:** `GEMINI_API_KEY`
-  (Google AI Studio) uses Gemini's Google-Search grounding free tier — weekly
-  probes for a personal site cost $0. Optional: `PERPLEXITY_API_KEY`,
-  `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` (~$1–2/month each at this volume).
+  10–30 queries) and at least one engine key. **Cheapest-first:** `GEMINI_API_KEY`
+  (Google AI Studio) uses Gemini's Google-Search grounding — note that grounded
+  requests require a **billing-linked** Google project (Tier 1; a fresh unbilled
+  key gets instant 429s). At weekly probe volume the cost is ≈$0 within the
+  monthly grounded allowance. Alternatives: `PERPLEXITY_API_KEY`,
+  `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` (~$1–2/month each at this volume, no
+  billing-tier dance).
 - **Cadence:** probes ride the daily cron once a week (`CITATION_CRON_DAY`,
   default Monday UTC; idempotent per day), or on demand via
   `POST /aeo/citations/run` / the `run_citation_check` MCP tool.

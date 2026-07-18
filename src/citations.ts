@@ -5,11 +5,11 @@
  * pipeline's weekly citation day (CITATION_CRON_DAY, default Monday UTC) or on
  * demand via POST /aeo/citations/run / the run_citation_check MCP tool.
  *
- * FREE-FIRST: the default engine is Gemini's Google-Search grounding, whose
- * free tier (thousands of grounded prompts/month) covers a personal site's
- * weekly probes at $0. Perplexity / OpenAI / Anthropic activate when their
- * keys are set — at ~10–30 queries weekly they cost a few dollars a month
- * combined. API answers are a PROXY for the consumer UIs (different retrieval
+ * CHEAPEST-FIRST: the default engine is Gemini's Google-Search grounding —
+ * grounded requests need a billing-linked Google project (Tier 1; unbilled
+ * keys 429 instantly as of mid-2026), but at weekly probe volume the cost is
+ * ≈$0 within the monthly grounded allowance. Perplexity / OpenAI / Anthropic
+ * activate when their keys are set — a few dollars a month combined. API answers are a PROXY for the consumer UIs (different retrieval
  * stacks), but gained/lost deltas over time are the actionable signal.
  *
  * Results land in the `citations` table; citationFindings() folds the latest
@@ -137,7 +137,7 @@ async function post(url: string, headers: Record<string, string>, body: unknown)
     signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
   });
   const text = await res.text();
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 600)}`);
   return JSON.parse(text);
 }
 
@@ -258,7 +258,7 @@ export async function runCitationProbes(env: Env): Promise<{
       try {
         sources = await engine.call(e, query);
       } catch (err) {
-        error = (err instanceof Error ? err.message : String(err)).slice(0, 300);
+        error = (err instanceof Error ? err.message : String(err)).slice(0, 700);
         errors++;
       }
       const m = matchSite(sources, host);
