@@ -5,6 +5,10 @@ node_modules/
 worker-configuration.d.ts
 # Your real config (with account-specific ids). Commit wrangler.example.jsonc instead.
 wrangler.jsonc
+# Additional per-site configs (Alan runs a second site, eo.alanwizemann.com).
+wrangler.eo.jsonc
+.dev.vars.eo
+injector/wrangler.jsonc
 dist/
 *.log
 .DS_Store
