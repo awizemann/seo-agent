@@ -60,6 +60,38 @@ export default {
     const url = new URL(request.url);
     const originUrl = `https://${env.ORIGIN_HOST}${url.pathname}${url.search}`;
     try {
+      // Markdown lane ("markdown for agents"): a GET that accepts text/markdown
+      // on a clean URL is answered with the origin's pregenerated .md twin when
+      // one exists (/eo/x → /eo/x.md), with Cloudflare-compatible headers.
+      // Browsers never send that Accept value; anything without a twin falls
+      // through to the normal proxy. MARKDOWN_LANE="false" disables.
+      const mdEnv = env as Env & { MARKDOWN_LANE?: string };
+      const wantsMd =
+        request.method === 'GET' &&
+        !/^(false|0|off)$/i.test(mdEnv.MARKDOWN_LANE ?? '') &&
+        (request.headers.get('accept') || '').includes('text/markdown') &&
+        !/\.[A-Za-z0-9]+$/.test(url.pathname);
+      if (wantsMd) {
+        try {
+          const mdPath = url.pathname.endsWith('/') ? `${url.pathname}index.md` : `${url.pathname}.md`;
+          const mdRes = await fetch(`https://${env.ORIGIN_HOST}${mdPath}`, {
+            headers: { 'user-agent': request.headers.get('user-agent') || 'seo-agent-injector' },
+          });
+          if (mdRes.ok && !(mdRes.headers.get('content-type') || '').includes('text/html')) {
+            const body = await mdRes.text();
+            return new Response(body, {
+              headers: {
+                'content-type': 'text/markdown; charset=utf-8',
+                'x-markdown-tokens': String(Math.ceil(body.length / 4)),
+                vary: 'accept',
+              },
+            });
+          }
+        } catch {
+          // fall through to the normal proxy
+        }
+      }
+
       const res = await fetch(new Request(originUrl, request));
 
       // Only HTML pages carry the meta we patch; assets/sitemap/robots stream through.

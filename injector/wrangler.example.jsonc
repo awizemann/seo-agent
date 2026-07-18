@@ -18,6 +18,10 @@
   "vars": {
     // Origin to proxy to — where the real content is served from. Must be a
     // DIFFERENT host than the route above (no proxy loop).
-    "ORIGIN_HOST": "example-origin.pages.dev"
+    "ORIGIN_HOST": "example-origin.pages.dev",
+    // Markdown lane: answer `Accept: text/markdown` on clean URLs with the
+    // origin's pregenerated `<path>.md` twin when one exists (on by default;
+    // "false" disables). See README "Markdown for agents".
+    "MARKDOWN_LANE": "true"
   }
 }

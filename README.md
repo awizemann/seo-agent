@@ -255,6 +255,33 @@ if (AI_BOT_RE.test(request.headers.get('user-agent') || '') && contentHtml) {
 }
 ```
 
+### Markdown for agents
+
+Agents increasingly negotiate for markdown instead of HTML: they send
+`Accept: text/markdown` (possibly alongside `text/html`) and expect
+`content-type: text/markdown; charset=utf-8` plus an `x-markdown-tokens`
+estimate — the convention Cloudflare's *Markdown for Agents* feature
+established. That feature is **Pro plan and up**, and its HTML→markdown
+conversion can't help a CSR SPA anyway (converting an empty shell yields
+nothing). This project gives you the same behavior on any plan:
+
+- **The proxy injector serves it for free.** Publish a `<path>.md` twin next to
+  each page at your origin (e.g. `/eo/some-page.md` beside `/eo/some-page`) —
+  for static sites, emit them at build time from the same data as the HTML.
+  The injector's **markdown lane** (on by default; `MARKDOWN_LANE: "false"`
+  disables) answers any `Accept: text/markdown` GET on a clean URL with the
+  twin, sending `content-type: text/markdown`, `x-markdown-tokens`, and
+  `Vary: accept`, and falls through to the normal proxy when no twin exists.
+- **Worker-fronted sites** should negotiate directly: on a content route whose
+  `Accept` includes `text/markdown`, return the page as markdown from your data
+  layer (and serve the same document at `<path>.md`), with the same three
+  headers. Advertise it with
+  `<link rel="alternate" type="text/markdown" href="<path>.md">` and a line in
+  your `llms.txt`.
+- If your policy differs from allow-all, also send a
+  [`Content-Signal`](https://contentsignals.org) header that matches your
+  robots.txt.
+
 ### Roadmap
 
 Next for this module: AI-crawler **hit telemetry** (a UA tap in the injector feeding
