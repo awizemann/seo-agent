@@ -6,6 +6,11 @@ crawlers receive, diagnoses issues with deterministic rules, drafts constrained
 meta-copy proposals with Workers AI, and — only after approval — applies them to the
 live site instantly through KV overrides. Every change is journaled and reversible.
 
+It also audits the site's **AEO/GEO posture** — whether AI answer engines (ChatGPT,
+Claude, Perplexity, Google AI Overviews, Copilot) can crawl it, read it, and cite it:
+llms.txt health, robots.txt AI-crawler policy, and whether pages actually serve
+content to non-JS AI fetchers. See [AEO / GEO checks](#aeo--geo-checks-ai-answer-engines).
+
 It pairs with an **edge SEO injector** on the site being managed: a Worker in front
 of your site that rewrites each page's `<head>` (title, description, canonical,
 OpenGraph/Twitter, JSON-LD) and, crucially, merges this agent's KV overrides over
@@ -26,7 +31,9 @@ Daily cron (and `POST /run` on demand):
 2. **Diagnose** — rules produce findings keyed `(path, rule)` with an open/auto-resolve
    lifecycle: injection regressions, missing/short/long descriptions, canonical
    mismatches, sitemap URLs that error or redirect, duplicate titles, missing Article
-   JSON-LD, noindex-in-sitemap, long titles, new/removed pages.
+   JSON-LD, noindex-in-sitemap, long titles, new/removed pages — plus the
+   [AEO/GEO checks](#aeo--geo-checks-ai-answer-engines): llms.txt health, robots.txt
+   AI-crawler policy, and an AI-user-agent deliverability sample.
 3. **Generate** — a run *enqueues* one drafting job per description-quality finding
    (capped at `MAX_PROPOSALS_PER_RUN`) and returns immediately; a **queue consumer**
    drafts them one at a time with Workers AI. Keeping drafting off the request path
@@ -137,6 +144,125 @@ property type — `sc-domain:example.com` for domain properties, the full URL fo
 URL-prefix properties. Note: GSC data lags ~2 days, and a brand-new property starts
 with almost no history.
 
+## AEO / GEO checks (AI answer engines)
+
+Classic SEO gets you ranked; AEO/GEO gets you **cited** — by ChatGPT, Claude,
+Perplexity, Google AI Overviews, and Copilot. Three facts drive what this module
+checks (all as of 2026):
+
+- **AI crawlers and user-request fetchers do not execute JavaScript.** GPTBot,
+  ClaudeBot, PerplexityBot, and the live fetchers (ChatGPT-User, Claude-User,
+  Perplexity-User) read raw HTML. A client-rendered SPA that serves an empty shell
+  is invisible to them at both index time and answer time, no matter how good its
+  `<head>` is.
+- **Blocking the wrong bot silently removes you from AI answers.** Answer-engine
+  crawlers (OAI-SearchBot, Claude-SearchBot, PerplexityBot, the user-fetchers —
+  plus Googlebot, which feeds AI Overviews/AI Mode, and Bingbot, which grounds
+  Copilot) must stay allowed if you want citations. Training-only crawlers
+  (GPTBot, ClaudeBot, CCBot, Google-Extended, Applebot-Extended…) are a policy
+  choice with **zero** citation cost either way.
+- **llms.txt is cheap insurance, not a lever.** Log studies show most llms.txt
+  files are never fetched by the big engines — but agent tooling and RAG pipelines
+  do use it, it costs almost nothing to serve, and a **soft-404** (a catch-all
+  that answers `200` with your HTML shell) is actively worse than a clean 404
+  because it feeds agents a misleading non-answer.
+
+The checks run inside every pipeline run (no extra setup, ~6 extra fetches) and
+emit findings through the same open/auto-resolve lifecycle as every other rule:
+
+| Rule | Severity | Fires when |
+| --- | --- | --- |
+| `ai_page_body_empty` | high | A sampled content page serves < 200 chars of visible body text to an AI-bot UA and has no `articleBody` JSON-LD fallback — the page is unreadable/uncitable for AI engines |
+| `ai_page_blocked` | high | A sampled page answers 403/429/451 to the AI-bot UA while the plain crawl got 200 — an edge/WAF/bot-management rule is blocking AI crawlers |
+| `robots_blocks_ai_bot` | high | robots.txt blocks an answer-engine crawler at `/` — silent removal from that engine's answers |
+| `llms_txt_soft_404` | high | `/llms.txt` (or `/llms-full.txt`) answers 200 with HTML — a catch-all shell misleading AI agents |
+| `robots_txt_unreachable` | medium | robots.txt is absent or unusable |
+| `llms_txt_missing` | medium | No `/llms.txt` |
+| `robots_no_ai_policy` | info | robots.txt names no AI crawler — implicit allow-all works, but explicit policy documents intent and survives injected/managed robots.txt defaults |
+| `llms_full_txt_missing` | info | `/llms.txt` exists but the optional full-content `/llms-full.txt` doesn't |
+| `aeo_check_error` | info | A check couldn't run this pass (transient fetch failure) |
+
+Configuration: `AEO_CHECKS` (default on; `"false"` disables) and `AEO_BOT_UA`
+(the UA for the deliverability sample; defaults to a GPTBot user agent). The
+sample prefers pages under `ARTICLE_PATH_PREFIX` when set.
+
+### Recommended robots.txt AI policy
+
+If `robots_no_ai_policy` nags you, this is the block it wants — explicit per-bot
+groups that document intent and take precedence over any injected or managed
+defaults. Keep the answer-engine group allowed; flip the training group to
+`Disallow: /` if you don't want your content in training corpora (it costs no
+citations):
+
+```txt
+# AI answer engines & user-triggered fetchers (citation surfaces)
+User-agent: OAI-SearchBot
+User-agent: ChatGPT-User
+User-agent: Claude-SearchBot
+User-agent: Claude-User
+User-agent: PerplexityBot
+User-agent: Perplexity-User
+User-agent: Meta-WebIndexer
+User-agent: meta-externalfetcher
+User-agent: DuckAssistBot
+User-agent: MistralAI-User
+User-agent: Amazonbot
+User-agent: Applebot
+Allow: /
+
+# Model-training crawlers (allow or disallow — your policy, zero citation cost)
+User-agent: GPTBot
+User-agent: ClaudeBot
+User-agent: CCBot
+User-agent: Google-Extended
+User-agent: Applebot-Extended
+User-agent: meta-externalagent
+User-agent: Bytespider
+Allow: /
+
+User-agent: *
+Allow: /
+
+Sitemap: https://example.com/sitemap.xml
+```
+
+Also check your CDN: Cloudflare zones onboarded after mid-2025 default to
+**blocking** AI crawlers (Security → Settings → *Bot traffic*, and the AI Crawl
+Control dashboard). robots.txt allows mean nothing if the edge 403s the bot —
+that's exactly what `ai_page_blocked` catches.
+
+### Serving llms.txt and fixing `ai_page_body_empty`
+
+- **Static sites:** generate `llms.txt` (a markdown index: one `[title](url):
+  summary` line per page) and optionally `llms-full.txt` (full corpus) at build
+  time, next to your sitemap. On SPA-style hosts with a catch-all, real files are
+  also what fixes the soft-404.
+- **Worker-fronted sites:** serve both from your data layer in the edge Worker,
+  exactly like a sitemap.
+- **`ai_page_body_empty` on a CSR SPA** has three fixes, in order of strength:
+  server-side/static rendering; an **AI content lane** — your injector detects AI-bot
+  UAs and injects the page's full content HTML into the body at the canonical URL
+  (leave Googlebot/Bingbot out of the UA list: they render JS and see the real page,
+  which also keeps you clear of cloaking concerns; send `Vary: User-Agent`); or, at
+  minimum, full text in the Article JSON-LD's `articleBody`, which the check accepts.
+
+```ts
+// AI content lane, sketched (in your injector, alongside the KV-override merge):
+const AI_BOT_RE = /GPTBot|OAI-SearchBot|ChatGPT-User|ClaudeBot|Claude-User|Claude-SearchBot|PerplexityBot|Perplexity-User|meta-external|Meta-WebIndexer|Amazonbot|CCBot|MistralAI-User|DuckAssistBot/i;
+if (AI_BOT_RE.test(request.headers.get('user-agent') || '') && contentHtml) {
+  rewriter = rewriter.on('div#root', { element: (el) => el.setInnerContent(articleHtml(contentHtml), { html: true }) });
+  headers.append('vary', 'User-Agent');
+}
+```
+
+### Roadmap
+
+Next for this module: AI-crawler **hit telemetry** (a UA tap in the injector feeding
+a D1 sense — which bots actually fetch you, how often, with what status codes),
+AI-referral segmentation, and a weekly **citation probe** (do the engines cite your
+domain for your target queries?) designed free-first around Gemini's grounding API
+free tier, with other engines optional behind their API keys.
+
 ## Review dashboard
 
 A self-contained human UI is served by the Worker itself at **`GET /`** (and
@@ -204,6 +330,8 @@ default or is optional. See `wrangler.example.jsonc` for the annotated template.
 | `SHELL_TITLE` (var) | | Your SPA shell's static `<title>`; `""` disables the injection-regression check |
 | `ARTICLE_PATH_PREFIX` (var) | | Content detail-page prefix (e.g. `/articles/`); enables the Article-JSON-LD check + enrichment |
 | `ARTICLE_API_TEMPLATE` (var) | | JSON endpoint with `{slug}` returning `{excerpt?, content?}` for richer drafting |
+| `AEO_CHECKS` (var) | | AEO/GEO checks (llms.txt, robots AI policy, AI-UA sampling); on by default, `"false"` disables |
+| `AEO_BOT_UA` (var) | | User agent for the AI deliverability sample; empty = a GPTBot UA |
 | `GSC_PROPERTY` (var) | | Search Console property id (`sc-domain:…` or URL) |
 | `GSC_SERVICE_ACCOUNT_JSON` (secret) | | Google service-account key; GSC sensing is dormant without it |
 

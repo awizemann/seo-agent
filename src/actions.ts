@@ -5,7 +5,9 @@
  */
 
 import { runCrawl } from './crawl.js';
-import { runRules } from './rules.js';
+import { runRules, type Triggered } from './rules.js';
+import { aeoChecks } from './aeo.js';
+import { siteConfig } from './config.js';
 import { enqueueCandidates, draftWithTrace } from './propose.js';
 import { ingestGsc } from './gsc.js';
 import { applyOverride, revertChange } from './overrides.js';
@@ -53,7 +55,15 @@ export async function startRun(env: Env, waitUntil: (p: Promise<unknown>) => voi
 export async function runPipeline(env: Env) {
   const { runId, snapshots } = await runCrawl(env);
   try {
-    const rules = await runRules(env, runId, snapshots);
+    // AEO checks share the findings lifecycle but are isolated like a sense —
+    // a failure here degrades to zero AEO findings, never a failed run.
+    let aeo: Triggered[] = [];
+    try {
+      aeo = await aeoChecks(env, snapshots);
+    } catch (err) {
+      console.error(JSON.stringify({ evt: 'aeo_error', error: err instanceof Error ? err.message : String(err) }));
+    }
+    const rules = await runRules(env, runId, snapshots, aeo);
 
     // Drafting is off the critical path: enqueue one job per candidate and let
     // the queue consumer draft them one at a time. A failure here (or in a
@@ -97,7 +107,11 @@ export async function statusData(env: Env) {
     proposalsByStatus: proposals.results,
     changes,
     gsc: gscRows,
-    config: { autoApplyFields: env.AUTO_APPLY_FIELDS || '(none — approval required)', model: env.AI_MODEL },
+    config: {
+      autoApplyFields: env.AUTO_APPLY_FIELDS || '(none — approval required)',
+      model: env.AI_MODEL,
+      aeoChecks: siteConfig(env).aeoChecks,
+    },
   };
 }
 

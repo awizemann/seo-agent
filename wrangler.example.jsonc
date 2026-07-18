@@ -70,7 +70,15 @@
     // Content detail-page prefix, e.g. "/articles/" or "/blog/".
     "ARTICLE_PATH_PREFIX": "",
     // JSON endpoint template with {slug} returning { excerpt?, content? }.
-    "ARTICLE_API_TEMPLATE": ""
+    "ARTICLE_API_TEMPLATE": "",
+
+    // --- AEO / GEO checks (on by default; see README "AEO / GEO checks") ---
+    // llms.txt presence/soft-404, robots.txt AI-crawler policy, and an AI-UA
+    // deliverability sample (are pages readable by non-JS AI crawlers?).
+    // Set "false" to disable.
+    "AEO_CHECKS": "true",
+    // UA for the deliverability sample; "" = a GPTBot user agent.
+    "AEO_BOT_UA": ""
   }
 
   // Secrets (wrangler secret put <NAME>):

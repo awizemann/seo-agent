@@ -17,10 +17,17 @@ export type SiteConfig = {
   articlePathPrefix: string;
   /** JSON endpoint template with {slug} returning {excerpt?, content?} for richer drafting context. "" disables enrichment. */
   articleApiTemplate: string;
+  /** AEO/GEO checks (llms.txt, robots AI policy, AI-UA deliverability sampling). On by default; "false"/"0"/"off" disables. */
+  aeoChecks: boolean;
+  /** User agent for the AI deliverability sample fetches (defaults to a GPTBot UA). */
+  aeoBotUa: string;
 };
 
 export function siteConfig(env: Env): SiteConfig {
   const host = new URL(env.SITE_URL).hostname;
+  // Optional-cast so upgraded deployments whose wrangler.jsonc predates these
+  // vars still typecheck (wrangler types only emits vars present in the config).
+  const e = env as Env & { AEO_CHECKS?: string; AEO_BOT_UA?: string };
   return {
     siteUrl: env.SITE_URL,
     siteName: env.SITE_NAME || host,
@@ -29,5 +36,9 @@ export function siteConfig(env: Env): SiteConfig {
     shellTitle: env.SHELL_TITLE || '',
     articlePathPrefix: env.ARTICLE_PATH_PREFIX || '',
     articleApiTemplate: env.ARTICLE_API_TEMPLATE || '',
+    aeoChecks: !/^(false|0|off)$/i.test(e.AEO_CHECKS ?? ''),
+    aeoBotUa:
+      e.AEO_BOT_UA ||
+      'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; GPTBot/1.2; +https://openai.com/gptbot',
   };
 }
