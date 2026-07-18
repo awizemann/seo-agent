@@ -11,6 +11,8 @@ import { siteConfig } from './config.js';
 import { enqueueCandidates, draftWithTrace } from './propose.js';
 import { ingestGsc } from './gsc.js';
 import { applyOverride, revertChange } from './overrides.js';
+import { telemetrySummary, telemetryFindings, pruneTelemetry, listCrawlerHits as telemetryHits } from './telemetry.js';
+import { runCitationProbes, citationFindings, citationConfig, alreadyCheckedToday } from './citations.js';
 
 export class ApiError extends Error {
   constructor(
@@ -55,15 +57,43 @@ export async function startRun(env: Env, waitUntil: (p: Promise<unknown>) => voi
 export async function runPipeline(env: Env) {
   const { runId, snapshots } = await runCrawl(env);
   try {
-    // AEO checks share the findings lifecycle but are isolated like a sense —
-    // a failure here degrades to zero AEO findings, never a failed run.
-    let aeo: Triggered[] = [];
+    // Sense modules share the findings lifecycle but are isolated — a failure
+    // in any of them degrades to zero findings from that sense, never a
+    // failed run.
+    const extra: Triggered[] = [];
+    const sense = async (name: string, fn: () => Promise<Triggered[]>) => {
+      try {
+        extra.push(...(await fn()));
+      } catch (err) {
+        console.error(JSON.stringify({ evt: `${name}_error`, error: err instanceof Error ? err.message : String(err) }));
+      }
+    };
+    await sense('aeo', () => aeoChecks(env, snapshots));
+    await sense('telemetry', () => telemetryFindings(env));
+    await sense('citations', () => citationFindings(env));
+
+    // Weekly citation probes ride the daily pipeline: on the configured UTC
+    // weekday, probe once (idempotent per day, so a manual /run can't
+    // double-spend API calls). Isolated like the senses above.
+    let citations;
     try {
-      aeo = await aeoChecks(env, snapshots);
+      const { queries, engines, cronDay } = citationConfig(env);
+      if (queries.length > 0 && engines.length > 0 && new Date().getUTCDay() === cronDay && !(await alreadyCheckedToday(env))) {
+        citations = await runCitationProbes(env);
+        // Fold the fresh results into this run's findings immediately.
+        await sense('citations_post', () => citationFindings(env));
+      }
     } catch (err) {
-      console.error(JSON.stringify({ evt: 'aeo_error', error: err instanceof Error ? err.message : String(err) }));
+      console.error(JSON.stringify({ evt: 'citation_probe_error', error: err instanceof Error ? err.message : String(err) }));
     }
-    const rules = await runRules(env, runId, snapshots, aeo);
+
+    try {
+      await pruneTelemetry(env);
+    } catch {
+      // retention pruning is best-effort
+    }
+
+    const rules = await runRules(env, runId, snapshots, dedupeTriggered(extra));
 
     // Drafting is off the critical path: enqueue one job per candidate and let
     // the queue consumer draft them one at a time. A failure here (or in a
@@ -83,7 +113,7 @@ export async function runPipeline(env: Env) {
       console.error(JSON.stringify({ evt: 'gsc_ingest_error', error: err instanceof Error ? err.message : String(err) }));
       gsc = { error: err instanceof Error ? err.message : String(err) };
     }
-    return { runId, urls: snapshots.length, rules, proposals, gsc };
+    return { runId, urls: snapshots.length, rules, proposals, gsc, citations };
   } finally {
     // Mark the run finished whether the post-crawl stages succeeded or not, so
     // it stops reading as "in progress" the moment real work is done.
@@ -91,15 +121,33 @@ export async function runPipeline(env: Env) {
   }
 }
 
+// A path can be flagged by more than one sense in a run (e.g. an AEO check and
+// a telemetry rule) — the findings upsert dedupes by (path, rule) key anyway,
+// but keep the triggered list clean for the log line.
+function dedupeTriggered(list: Triggered[]): Triggered[] {
+  const seen = new Set<string>();
+  return list.filter((t) => {
+    const k = `${t.path} ${t.rule}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
 export async function statusData(env: Env) {
-  const [lastRun, findings, proposals, changes, gscRows, running] = await Promise.all([
+  const [lastRun, findings, proposals, changes, gscRows, running, telemetry, latestCitations] = await Promise.all([
     env.DB.prepare('SELECT id, started_at, finished_at, url_count, ok, pipeline_done FROM crawl_runs ORDER BY id DESC LIMIT 1').first(),
     env.DB.prepare("SELECT severity, COUNT(*) AS n FROM findings WHERE status = 'open' GROUP BY severity").all(),
     env.DB.prepare('SELECT status, COUNT(*) AS n FROM proposals GROUP BY status').all(),
     env.DB.prepare('SELECT COUNT(*) AS applied, SUM(CASE WHEN reverted_at IS NOT NULL THEN 1 ELSE 0 END) AS reverted FROM changes').first(),
     env.DB.prepare('SELECT COUNT(*) AS n, MAX(date) AS latest FROM gsc_daily').first(),
     isRunning(env),
+    telemetrySummary(env),
+    env.DB.prepare(
+      'SELECT MAX(checked_at) AS last, COUNT(*) AS total, SUM(cited) AS cited FROM citations WHERE checked_at = (SELECT MAX(checked_at) FROM citations)'
+    ).first<{ last: string | null; total: number; cited: number | null }>(),
   ]);
+  const citCfg = citationConfig(env);
   return {
     lastRun,
     running,
@@ -107,12 +155,39 @@ export async function statusData(env: Env) {
     proposalsByStatus: proposals.results,
     changes,
     gsc: gscRows,
+    aeo: {
+      telemetry,
+      citations: {
+        lastCheck: latestCitations?.last ?? null,
+        cited: latestCitations?.cited ?? 0,
+        total: latestCitations?.total ?? 0,
+        queries: citCfg.queries.length,
+        engines: citCfg.engines,
+      },
+    },
     config: {
       autoApplyFields: env.AUTO_APPLY_FIELDS || '(none — approval required)',
       model: env.AI_MODEL,
       aeoChecks: siteConfig(env).aeoChecks,
     },
   };
+}
+
+export async function listAeoHits(env: Env, days = 7, limit = 200) {
+  return telemetryHits(env, days, limit);
+}
+
+export async function listCitations(env: Env, limit = 200) {
+  const rows = await env.DB.prepare(
+    'SELECT checked_at, engine, query, cited, rank, cited_url, total_sources, error FROM citations ORDER BY id DESC LIMIT ?'
+  )
+    .bind(Math.min(Math.max(limit, 1), 500))
+    .all();
+  return rows.results;
+}
+
+export async function runCitationCheck(env: Env) {
+  return runCitationProbes(env);
 }
 
 export async function listFindings(env: Env, status = 'open') {

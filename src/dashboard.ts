@@ -189,9 +189,15 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
     var pending = 0, applied = (s.changes && s.changes.applied) || 0;
     (s.proposalsByStatus || []).forEach(function (r) { if (r.status === 'proposed') pending = r.n; });
     var gsc = s.gsc || {};
+    var aeo = s.aeo || {}, tel = aeo.telemetry || {}, cit = aeo.citations || {};
+    var crawls = 0;
+    (tel.crawler7d || []).forEach(function (r) { crawls += r.n; });
     var cards = [
       ['Pending', pending], ['Open findings', open], ['Applied', applied],
-      ['GSC rows', num(gsc.n) + (gsc.latest ? ' · to ' + gsc.latest : '')]
+      ['GSC rows', num(gsc.n) + (gsc.latest ? ' · to ' + gsc.latest : '')],
+      ['AI crawls 7d', tel.active ? crawls : '—'],
+      ['AI referrals 7d', tel.active ? num(tel.referral7d) : '—'],
+      ['Cited', cit.total ? (num(cit.cited) + '/' + num(cit.total)) : ((cit.queries && (cit.engines || []).length) ? 'pending' : 'off')]
     ];
     el('cards').innerHTML = cards.map(function (c) {
       return '<div class="card"><div class="n">' + esc(c[1]) + '</div><div class="l">' + esc(c[0]) + '</div></div>';

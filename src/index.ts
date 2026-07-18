@@ -23,6 +23,9 @@ import {
   listChanges,
   revertById,
   listOverrides,
+  listAeoHits,
+  listCitations,
+  runCitationCheck,
 } from './actions.js';
 import { invalidReason, draftAndCreate, type DraftJob } from './propose.js';
 import { handleMcp } from './mcp.js';
@@ -103,6 +106,14 @@ export default {
       }
 
       if (method === 'GET' && pathname === '/overrides') return json(await listOverrides(env));
+
+      // AEO sensing: AI-traffic telemetry (written by the site's tap) and
+      // citation-probe results/trigger.
+      if (method === 'GET' && pathname === '/aeo/hits') {
+        return json(await listAeoHits(env, parseInt(url.searchParams.get('days') || '7', 10) || 7));
+      }
+      if (method === 'GET' && pathname === '/aeo/citations') return json(await listCitations(env));
+      if (method === 'POST' && pathname === '/aeo/citations/run') return json(await runCitationCheck(env));
 
       return json({ error: 'not found' }, 404);
     } catch (err) {

@@ -37,8 +37,10 @@ export function siteConfig(env: Env): SiteConfig {
     articlePathPrefix: env.ARTICLE_PATH_PREFIX || '',
     articleApiTemplate: env.ARTICLE_API_TEMPLATE || '',
     aeoChecks: !/^(false|0|off)$/i.test(e.AEO_CHECKS ?? ''),
+    // The trailing "seo-agent-sample" marker lets telemetry taps ignore the
+    // agent's own deliverability probes (they'd otherwise count as GPTBot).
     aeoBotUa:
       e.AEO_BOT_UA ||
-      'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; GPTBot/1.2; +https://openai.com/gptbot',
+      'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; GPTBot/1.2; +https://openai.com/gptbot; seo-agent-sample',
   };
 }

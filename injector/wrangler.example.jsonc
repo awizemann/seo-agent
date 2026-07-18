@@ -15,6 +15,13 @@
   // The SAME KV namespace your seo-agent writes overrides to.
   "kv_namespaces": [{ "binding": "SEO_OVERRIDES", "id": "REPLACE_WITH_YOUR_KV_NAMESPACE_ID" }],
 
+  // OPTIONAL — AEO telemetry tap: bind the seo-agent's D1 database and the
+  // injector records AI-relevant traffic (AI-crawler hits, AI referrals,
+  // markdown-lane responses) into its aeo_hits table. Remove to disable.
+  // "d1_databases": [
+  //   { "binding": "TELEMETRY", "database_name": "seo-agent-db", "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID" }
+  // ],
+
   "vars": {
     // Origin to proxy to — where the real content is served from. Must be a
     // DIFFERENT host than the route above (no proxy loop).

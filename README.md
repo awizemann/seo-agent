@@ -282,13 +282,48 @@ nothing). This project gives you the same behavior on any plan:
   [`Content-Signal`](https://contentsignals.org) header that matches your
   robots.txt.
 
-### Roadmap
+### AI traffic telemetry
 
-Next for this module: AI-crawler **hit telemetry** (a UA tap in the injector feeding
-a D1 sense — which bots actually fetch you, how often, with what status codes),
-AI-referral segmentation, and a weekly **citation probe** (do the engines cite your
-domain for your target queries?) designed free-first around Gemini's grounding API
-free tier, with other engines optional behind their API keys.
+Which AI engines actually read your site? GA-style analytics can never tell you —
+crawlers don't run JavaScript. The telemetry tap records it at the edge instead:
+
+- **Setup (proxy injector):** bind the agent's D1 database into the injector as
+  `TELEMETRY` (see the commented block in `injector/wrangler.example.jsonc`) and
+  redeploy. **Worker-fronted sites:** bind the same database (any binding name)
+  and insert into `aeo_hits` from your edge handler — copy the injector's
+  `tapAeo()` (~30 lines).
+- **What's recorded — AI-relevant traffic only:** requests whose UA matches a
+  known AI crawler (which bot, path, status, and whether the markdown twin /
+  AI content lane / plain HTML was served), human clicks arriving with an AI
+  engine Referer (chatgpt.com, perplexity.ai, claude.ai, gemini, copilot, …),
+  and markdown-lane responses. Ordinary traffic is never written. Fire-and-forget
+  via `waitUntil`, fail-open, pruned after 90 days.
+- **Read it:** dashboard cards (AI crawls / AI referrals, 7d), `GET /aeo/hits`,
+  the `list_crawler_hits` MCP tool, and two low-noise findings —
+  `ai_crawlers_silent` (tap active ≥14 days, zero AI-crawler hits) and
+  `ai_crawler_errors` (a bot getting >20% errors).
+- Note: Google AI Mode clicks carry `noreferrer` and are invisible to referral
+  telemetry everywhere, not just here.
+
+### Citation probes
+
+The outcome metric: do the engines **cite you** for the queries you care about?
+
+- **Configure:** set `CITATION_QUERIES` (a JSON array or `|`-separated list of
+  10–30 queries) and at least one engine key. **Free-first:** `GEMINI_API_KEY`
+  (Google AI Studio) uses Gemini's Google-Search grounding free tier — weekly
+  probes for a personal site cost $0. Optional: `PERPLEXITY_API_KEY`,
+  `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` (~$1–2/month each at this volume).
+- **Cadence:** probes ride the daily cron once a week (`CITATION_CRON_DAY`,
+  default Monday UTC; idempotent per day), or on demand via
+  `POST /aeo/citations/run` / the `run_citation_check` MCP tool.
+- **Results:** per engine × query — cited or not, rank among the answer's
+  sources, and the cited URL — in `GET /aeo/citations`, the `list_citations`
+  MCP tool, and a dashboard card. Deltas become findings: `citation_lost`
+  (medium — was cited, isn't anymore; stays open until regained) and
+  `citation_gained` (info).
+- Caveat: engine APIs are a *proxy* for the consumer UIs (different retrieval
+  stacks). Track the deltas, not the absolute numbers.
 
 ## Review dashboard
 
@@ -316,9 +351,11 @@ claude mcp add --transport http seo-agent https://<worker-host>/mcp \
 
 Any Claude session can then drive the agent conversationally — "what did the SEO
 agent find overnight?", "approve proposal 7", "draft me three alternatives for
-/press" — via the tools: `seo_status`, `run_pipeline`, `list_findings`,
-`list_proposals`, `approve_proposal`, `reject_proposal`, `create_proposal`,
-`dry_run_draft`, `list_changes`, `revert_change`, `list_overrides`.
+/press", "which AI bots crawled us this week?" — via the tools: `seo_status`,
+`run_pipeline`, `list_findings`, `list_proposals`, `approve_proposal`,
+`reject_proposal`, `create_proposal`, `dry_run_draft`, `list_changes`,
+`revert_change`, `list_overrides`, `list_crawler_hits`, `list_citations`,
+`run_citation_check`.
 
 ## Control API
 
@@ -337,6 +374,9 @@ All endpoints require `Authorization: Bearer <AGENT_TOKEN>` (the MCP endpoint to
 | `GET /changes` | The apply/revert journal |
 | `POST /changes/:id/revert` | Remove an override; the site falls back to its baked value; retires the source proposal |
 | `GET /overrides` | Current live override state from KV |
+| `GET /aeo/hits?days=7` | AI-traffic telemetry: crawler fetches, AI referrals, markdown-lane responses |
+| `GET /aeo/citations` | Citation-probe results (engine × query: cited, rank, cited URL), newest first |
+| `POST /aeo/citations/run` | Probe all configured engines with every citation query now |
 
 ## Configuration
 
@@ -361,6 +401,10 @@ default or is optional. See `wrangler.example.jsonc` for the annotated template.
 | `AEO_BOT_UA` (var) | | User agent for the AI deliverability sample; empty = a GPTBot UA |
 | `GSC_PROPERTY` (var) | | Search Console property id (`sc-domain:…` or URL) |
 | `GSC_SERVICE_ACCOUNT_JSON` (secret) | | Google service-account key; GSC sensing is dormant without it |
+| `CITATION_QUERIES` (var) | | Queries for the citation probes (JSON array or `\|`-separated); empty = probes off |
+| `CITATION_CRON_DAY` (var) | | UTC weekday (0–6) the weekly probes run on; default `1` (Monday) |
+| `GEMINI_API_KEY` (secret) | | Citation probes via Gemini Google-Search grounding — the free-tier default engine |
+| `PERPLEXITY_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` (secrets) | | Optional additional citation engines (each ~$1–2/mo at weekly cadence) |
 
 ## Safety model
 

@@ -78,10 +78,25 @@
     // Set "false" to disable.
     "AEO_CHECKS": "true",
     // UA for the deliverability sample; "" = a GPTBot user agent.
-    "AEO_BOT_UA": ""
+    "AEO_BOT_UA": "",
+
+    // --- citation probes (optional; see README "Citation probes") ---
+    // The queries you want AI engines to cite you for: a JSON array, or
+    // |-separated text. Empty = probes off. Needs at least one engine key
+    // (secrets below) — GEMINI_API_KEY's free grounding tier costs $0.
+    "CITATION_QUERIES": "",
+    // UTC weekday the daily cron probes on (0=Sun … 6=Sat). Default Monday.
+    "CITATION_CRON_DAY": "1"
   }
 
   // Secrets (wrangler secret put <NAME>):
   //   AGENT_TOKEN               — required; gates the API, MCP, and dashboard
   //   GSC_SERVICE_ACCOUNT_JSON  — optional; enables Search Console ingestion
+  //   GEMINI_API_KEY            — optional; citation probes via Google-Search
+  //                               grounding (free tier — the default engine)
+  //   PERPLEXITY_API_KEY        — optional; citation probes via Perplexity Sonar
+  //   OPENAI_API_KEY            — optional; citation probes via Responses web_search
+  //   ANTHROPIC_API_KEY         — optional; citation probes via Claude web_search
+  // Model overrides (vars, optional): CITATION_GEMINI_MODEL,
+  // CITATION_PERPLEXITY_MODEL, CITATION_OPENAI_MODEL, CITATION_ANTHROPIC_MODEL.
 }

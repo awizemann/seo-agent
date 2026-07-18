@@ -22,6 +22,9 @@ import {
   listChanges,
   revertById,
   listOverrides,
+  listAeoHits,
+  listCitations,
+  runCitationCheck,
 } from './actions.js';
 import { invalidReason } from './propose.js';
 
@@ -124,6 +127,30 @@ const TOOLS: Tool[] = [
     description: 'The current live override state (what the edge injector is merging right now), straight from KV.',
     inputSchema: { type: 'object', properties: {} },
     handler: (env) => listOverrides(env),
+  },
+  {
+    name: 'list_crawler_hits',
+    description:
+      'Recent AI-traffic telemetry recorded by the site: AI crawler fetches (which bot, path, status, whether the markdown twin or AI content lane was served) and human referrals from AI engines. Empty until the site-side tap (TELEMETRY D1 binding) is wired up.',
+    inputSchema: {
+      type: 'object',
+      properties: { days: { type: 'number', description: 'Look-back window in days (default 7, max 90)' } },
+    },
+    handler: (env, a) => listAeoHits(env, Number(a.days) || 7),
+  },
+  {
+    name: 'list_citations',
+    description:
+      'Citation-probe results, newest first: per engine × query, whether an AI answer engine cited this site (cited/rank/cited_url). Probes run weekly on CITATION_CRON_DAY or on demand via run_citation_check.',
+    inputSchema: { type: 'object', properties: {} },
+    handler: (env) => listCitations(env),
+  },
+  {
+    name: 'run_citation_check',
+    description:
+      'Probe the configured AI engines (Gemini free-tier by default; Perplexity/OpenAI/Anthropic when their keys are set) with every CITATION_QUERIES query right now and record who cites the site. Returns {checked, cited, errors, engines} — or a `skipped` reason when queries/keys are not configured. Costs API quota on each call.',
+    inputSchema: { type: 'object', properties: {} },
+    handler: (env) => runCitationCheck(env),
   },
 ];
 

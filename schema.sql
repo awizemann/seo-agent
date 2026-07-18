@@ -83,3 +83,39 @@ CREATE TABLE IF NOT EXISTS gsc_daily (
   PRIMARY KEY (date, page, query)
 );
 CREATE INDEX IF NOT EXISTS idx_gsc_page ON gsc_daily (page, date);
+
+-- AEO telemetry — AI-relevant hits written directly by the SITE's injector /
+-- edge Worker (optional TELEMETRY / AEO_TELEMETRY D1 binding, fire-and-forget
+-- via waitUntil, fail-open). The agent reads, aggregates, and prunes (90 days).
+-- kind: 'crawler' = known AI-bot UA; 'referral' = human arriving from an AI
+-- engine (Referer); 'agent' = unknown client that negotiated markdown.
+CREATE TABLE IF NOT EXISTS aeo_hits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  bot TEXT,
+  referrer TEXT,
+  path TEXT NOT NULL,
+  status INTEGER,
+  served TEXT,                     -- 'html' | 'lane' (AI content lane) | 'md' (markdown twin) | 'file'
+  ua TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_aeo_hits_ts ON aeo_hits (ts);
+CREATE INDEX IF NOT EXISTS idx_aeo_hits_bot ON aeo_hits (bot, ts);
+
+-- Citation probes — periodic checks of whether AI answer engines cite the
+-- site for configured queries (CITATION_QUERIES). One row per engine × query
+-- per probe batch (checked_at identifies the batch).
+CREATE TABLE IF NOT EXISTS citations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  checked_at TEXT NOT NULL,
+  engine TEXT NOT NULL,            -- gemini | perplexity | openai | anthropic
+  query TEXT NOT NULL,
+  cited INTEGER NOT NULL,          -- 1 = the site appeared in the answer's sources
+  rank INTEGER,                    -- 1-based position of the first matching source
+  cited_url TEXT,
+  total_sources INTEGER,
+  sources TEXT,                    -- JSON array of {url, domain, title}, truncated
+  error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_citations_key ON citations (engine, query, checked_at);
