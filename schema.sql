@@ -127,11 +127,13 @@ CREATE TABLE IF NOT EXISTS change_impact (
 );
 CREATE INDEX IF NOT EXISTS idx_change_impact_change ON change_impact (change_id);
 
--- Weekly rollups of AI-traffic telemetry. aeo_hits is pruned at 90 days; these
--- completed-ISO-week aggregates (Mon-start, UTC) survive the prune, giving
--- permanent AI-traffic history. One row per (week_start, kind, bot, served);
--- bot/served are coalesced to '' (never NULL) so INSERT OR REPLACE stays
--- idempotent — SQLite treats NULLs as distinct in a UNIQUE index.
+-- Write-once weekly rollups of AI-traffic telemetry. A completed ISO week
+-- (Mon-start, UTC) is rolled up while all its hits are still inside the 90-day
+-- aeo_hits retention; that first INSERT is final (OR IGNORE — never REPLACEd),
+-- so the rollup survives the later prune untouched. Weeks already partially
+-- pruned when the feature first runs are skipped, not frozen wrong. One row per
+-- (week_start, kind, bot, served); bot/served are coalesced to '' (never NULL)
+-- so the UNIQUE key actually dedupes — SQLite treats NULLs as distinct.
 CREATE TABLE IF NOT EXISTS aeo_weekly (
   week_start TEXT NOT NULL,          -- ISO Monday, YYYY-MM-DD, UTC
   kind TEXT NOT NULL,

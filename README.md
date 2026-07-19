@@ -392,22 +392,31 @@ dashboard, over the API, and via MCP.
 - **Search performance over time** — GSC clicks, impressions, CTR, and average
   position, summed across all pages, daily for 90 days.
 - **AI traffic** — daily crawler / referral / agent counts for 30 days, plus
-  **permanent weekly rollups** (`aeo_weekly`): `aeo_hits` is pruned at 90 days,
-  but completed-ISO-week aggregates survive the prune, so AI-traffic history
-  never disappears. Also the top AI bots of the last 7 days.
-- **Citations over time** — every probe result (per engine × query: cited, rank)
-  across all history.
+  **write-once weekly rollups** (`aeo_weekly`): a completed ISO week is rolled up
+  on the first run after it closes — while every hit is still inside the 90-day
+  `aeo_hits` retention, so the write is complete — and never overwritten
+  afterwards. Weeks fully inside retention at first rollup are therefore
+  permanent; on an upgrade arriving with ~90 days of pre-existing hits, weeks the
+  prune has already eaten into are skipped, not frozen wrong. Also the top AI
+  bots of the last 7 days.
+- **Citations over time** — probe results (per engine × query: cited, rank),
+  bounded at the most recent 4,000 rows — decades of history at weekly cadence.
 - **Open findings over time** — a daily open-count series by severity for 90
   days, computed from the findings' `created_at` / `resolved_at`.
 - **Per-change impact** — did each applied override help or hurt the page it
   changed? (below)
 
 **GSC backfill.** GSC sensing ingests only a trailing ~3-day window per run, so
-a fresh install has almost no history. The first time the sense runs against a
-database with fewer than 30 distinct dates of GSC data, it **backfills ~90 days
-once** (date-chunked, paged, API-call-capped, `INSERT OR REPLACE`), then never
-again — once history exists the trigger is false. It only runs where GSC is
-configured.
+a fresh install has almost no history. When the sense runs against a database
+with fewer than 30 distinct dates of GSC data, it **backfills ~90 days**
+(date-chunked, paged, capped at 40 API calls, `INSERT OR REPLACE` so overlap is
+harmless). Effectively one-shot: as soon as 30 distinct dates exist the trigger
+is false forever. A property that simply doesn't have 30 days of data yet (young,
+or too small to register daily impressions) re-attempts on each daily run — a
+few bounded calls against a many-thousands daily GSC quota — and self-resolves
+once enough days accrue. On a very large property the call cap is a safety
+valve: up to 40 calls' worth of history is taken and the rest forgone (logged as
+`gsc_backfill_capped`). It only runs where GSC is configured.
 
 **Change-impact verdicts — correlation, not causation.** For every un-reverted
 change the impact engine compares GSC metrics for the changed page across a
@@ -444,7 +453,7 @@ tables — never 500):
 
 | Endpoint | What it does |
 | --- | --- |
-| `GET /analytics/summary` | The whole dashboard payload: `gsc` (active + 90d daily), `aeo` (30d daily + weekly rollups + top bots 7d), `citations` (active + full series), `findings` (90d open-count series), `changes` (each with its latest verdict) |
+| `GET /analytics/summary` | The whole dashboard payload: `gsc` (active + 90d daily), `aeo` (30d daily + weekly rollups + top bots 7d), `citations` (active + series, newest 4,000), `findings` (90d open-count series), `changes` (each with its latest verdict) |
 | `GET /analytics/page?path=/x` | One page: 90d GSC series, its changes with their impact rows, 30d AI-hit counts |
 | `GET /analytics/impact` | Every `change_impact` row joined with its change (path, field, applied_at, verdict) |
 

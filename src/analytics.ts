@@ -83,7 +83,10 @@ async function gscDailyForPath(env: Env, path: string, sinceDate: string) {
 
 /** GET /analytics/summary — the whole dashboard payload. */
 export async function analyticsSummary(env: Env) {
-  const gscSince = dateDaysAgo(90);
+  // Shared 90-day date bound (YYYY-MM-DD): the GSC daily window and the SQL
+  // pre-filter for the findings series (one day more generous than the series'
+  // earliest charted day — safe, never excludes a row that could count).
+  const since90 = dateDaysAgo(90);
   const aeoSince = isoDaysAgo(30);
 
   const [gscDaily, gscActive] = await Promise.all([
@@ -93,7 +96,7 @@ export async function analyticsSummary(env: Env) {
               CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions) / SUM(impressions) ELSE 0 END AS position
        FROM gsc_daily WHERE date >= ? GROUP BY date ORDER BY date`
     )
-      .bind(gscSince)
+      .bind(since90)
       .all<{ date: string; clicks: number; impressions: number; ctr: number; position: number }>()
       .then((r) => r.results)
       .catch(() => []),
@@ -128,16 +131,29 @@ export async function analyticsSummary(env: Env) {
       .catch(() => []),
   ]);
 
-  const citSeries = await env.DB.prepare(
-    'SELECT checked_at, engine, query, cited, rank FROM citations ORDER BY checked_at, id'
-  )
-    .all<{ checked_at: string; engine: string; query: string; cited: number; rank: number | null }>()
-    .then((r) => r.results)
-    .catch(() => []);
+  // Newest rows first with a generous cap — decades of history at weekly probe
+  // cadence — then reversed to ascending, so a years-old install can't balloon
+  // the summary payload.
+  const citSeries = (
+    await env.DB.prepare(
+      'SELECT checked_at, engine, query, cited, rank FROM citations ORDER BY checked_at DESC, id DESC LIMIT 4000'
+    )
+      .all<{ checked_at: string; engine: string; query: string; cited: number; rank: number | null }>()
+      .then((r) => r.results)
+      .catch(() => [])
+  ).reverse();
   const citCfg = citationConfig(env);
   const citationsActive = citSeries.length > 0 || (citCfg.queries.length > 0 && citCfg.engines.length > 0);
 
-  const findingRows = await env.DB.prepare('SELECT created_at, resolved_at, severity FROM findings')
+  // Bounded: a finding resolved before the 90-day window opened is closed on
+  // every charted day (openFindingsSeries treats a finding as closed from its
+  // resolve day onward), so it can never affect the series — exclude such rows
+  // in SQL and the table can grow for years without ballooning this read.
+  // Unresolved rows always load: they are open regardless of age.
+  const findingRows = await env.DB.prepare(
+    'SELECT created_at, resolved_at, severity FROM findings WHERE resolved_at IS NULL OR resolved_at >= ?'
+  )
+    .bind(since90)
     .all<FindingRow>()
     .then((r) => r.results)
     .catch(() => [] as FindingRow[]);

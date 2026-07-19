@@ -62,9 +62,14 @@ const addDays = (date: string, n: number): string => {
   return d.toISOString().slice(0, 10);
 };
 
-// One-shot history backfill: when gsc_daily holds fewer than this many distinct
-// dates the sense fetches ~90 days once (chunked, capped) so the analytics
-// layer has a real baseline. Once history exists the trigger is false forever.
+// History backfill: when gsc_daily holds fewer than this many distinct dates
+// the sense fetches ~90 days (chunked, capped) so the analytics layer has a
+// real baseline. Effectively one-shot: as soon as 30 distinct dates exist the
+// trigger is false forever. A property that never accrues 30 dates (young, or
+// too small to register daily impressions) re-attempts on each daily run —
+// deliberate: it's idempotent and a few calls against a many-thousands daily
+// GSC quota, and it self-resolves the moment enough days land. No state
+// machinery needed.
 const BACKFILL_MIN_DATES = 30;
 const BACKFILL_DAYS = 90;
 const BACKFILL_CHUNK_DAYS = 30;
@@ -123,7 +128,15 @@ async function backfillGsc(env: Env, token: string, endpoint: string): Promise<{
     calls += c;
     await upsertRows(env, rows);
     totalRows += rows.length;
-    if (calls >= MAX_BACKFILL_CALLS) break; // safety cap — pick up the rest next run
+    if (calls >= MAX_BACKFILL_CALLS) {
+      // Safety valve, unreachable at small-site volume (one call per 30-day
+      // chunk). A very large property gets up to this many paged calls of
+      // history and the remainder is FORGONE, not resumed: if this partial
+      // fetch already pushed distinct dates past BACKFILL_MIN_DATES, the
+      // thin-history trigger goes false and the backfill never runs again.
+      console.log(JSON.stringify({ evt: 'gsc_backfill_capped', calls, rows: totalRows, coveredTo: chunkEnd }));
+      break;
+    }
     chunkStart = addDays(chunkEnd, 1);
   }
   const range = `${overallStart}..${overallEnd}`;
@@ -146,8 +159,9 @@ export async function ingestGsc(
   await upsertRows(env, rows);
   console.log(JSON.stringify({ evt: 'gsc_ingest_complete', window: `${startDate}..${endDate}`, rows: rows.length }));
 
-  // Thin history → one-shot 90-day backfill (INSERT OR REPLACE, so overlap with
-  // the trailing window above is harmless).
+  // Thin history → 90-day backfill (INSERT OR REPLACE, so overlap with the
+  // trailing window above is harmless; see the trigger semantics on
+  // BACKFILL_MIN_DATES above).
   let backfill: { range: string; rows: number; calls: number } | undefined;
   const distinct = await env.DB.prepare('SELECT COUNT(DISTINCT date) AS n FROM gsc_daily').first<{ n: number }>();
   if ((distinct?.n ?? 0) < BACKFILL_MIN_DATES) {

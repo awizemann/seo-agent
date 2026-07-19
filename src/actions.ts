@@ -123,8 +123,9 @@ export async function runPipeline(env: Env, runId: number) {
     if (!citationsSensed) await sense('citations', () => citationFindings(env));
 
     try {
-      // Roll up completed weeks BEFORE the prune so a week aging past 90 days is
-      // captured into permanent history first.
+      // Write-once weekly rollups BEFORE the prune: a completed week is frozen
+      // on the first run after it closes, long before the prune could touch it
+      // (see rollupTelemetryWeekly for the eligibility guard).
       await rollupTelemetryWeekly(env);
     } catch {
       // weekly rollup is best-effort

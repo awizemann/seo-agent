@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { pageToPath, pageCandidates } from '../src/pagepath';
 import { verdictFor, addDays, windowsFor, type ImpactMetrics } from '../src/impact';
-import { weekStartOf } from '../src/telemetry';
+import { weekStartOf, eligibleWeeks } from '../src/telemetry';
 import { openFindingsSeries, type FindingRow } from '../src/analytics';
 
 describe('pageToPath', () => {
@@ -146,6 +146,47 @@ describe('weekStartOf', () => {
   });
   it('crosses a month boundary correctly', () => {
     expect(weekStartOf('2026-08-02T06:00:00Z')).toBe('2026-07-27'); // Sun → prior Mon in July
+  });
+});
+
+describe('eligibleWeeks', () => {
+  // now: Sunday 2026-07-19 12:00 UTC — the current ISO week began Monday
+  // 2026-07-13; the 90-day retention cutoff is 2026-04-20T12:00:00Z.
+  const now = '2026-07-19T12:00:00.000Z';
+
+  it('excludes the current (in-progress) week', () => {
+    expect(eligibleWeeks(now, ['2026-07-13'], 90)).toEqual([]);
+  });
+
+  it('includes a recently completed week', () => {
+    expect(eligibleWeeks(now, ['2026-07-06'], 90)).toEqual(['2026-07-06']);
+  });
+
+  it('upgrade case: weeks the prune has already entered are skipped, not rolled up', () => {
+    // The week starting Mon 2026-04-20 began at 00:00, BEFORE the 12:00 cutoff,
+    // so its earliest hits are already pruned — rolling it up now would freeze
+    // a wrong partial count. Older weeks are skipped a fortiori.
+    expect(eligibleWeeks(now, ['2026-04-20', '2026-04-13', '2026-01-05'], 90)).toEqual([]);
+  });
+
+  it('the first week fully inside retention qualifies', () => {
+    expect(eligibleWeeks(now, ['2026-04-27'], 90)).toEqual(['2026-04-27']);
+  });
+
+  it('filters a mixed list to completed weeks fully inside retention', () => {
+    expect(eligibleWeeks(now, ['2026-01-05', '2026-04-20', '2026-04-27', '2026-07-06', '2026-07-13'], 90)).toEqual([
+      '2026-04-27',
+      '2026-07-06',
+    ]);
+  });
+
+  it('a week is eligible exactly when its Monday 00:00 is not before the cutoff', () => {
+    // now = Monday 2026-07-13 00:00 UTC. At 90-day retention the cutoff is
+    // 2026-04-14T00:00Z: the week starting 04-20 is fully inside, the week
+    // starting 04-13 began one day before the cutoff and is excluded.
+    expect(eligibleWeeks('2026-07-13T00:00:00.000Z', ['2026-04-20', '2026-04-13'], 90)).toEqual(['2026-04-20']);
+    // At 91 days the cutoff lands EXACTLY on Monday 04-13 00:00 — >= keeps it.
+    expect(eligibleWeeks('2026-07-13T00:00:00.000Z', ['2026-04-13', '2026-04-06'], 91)).toEqual(['2026-04-13']);
   });
 });
 

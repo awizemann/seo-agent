@@ -119,14 +119,34 @@ export function weekStartOf(isoTs: string): string {
 }
 
 /**
- * Aggregate aeo_hits into permanent weekly rollups. Runs each pipeline run
- * (before the 90-day prune, so a week about to age out is captured first). Only
- * COMPLETED ISO weeks (week_start strictly before the current week) are rolled
- * up; the in-progress week is left until it closes. INSERT OR REPLACE keeps it
- * idempotent — re-rolling a still-present completed week just refreshes the same
- * numbers, and a week whose hits have since been pruned simply isn't re-touched,
- * so its rollup survives. bot/served coalesce to '' (never NULL) so the UNIQUE
- * key actually dedupes (SQLite treats NULLs as distinct).
+ * Weeks eligible for rollup at `nowIso`, from the distinct weeks present in
+ * aeo_hits: a week qualifies only when it is BOTH completed (strictly before
+ * the current ISO week) AND still entirely inside the retention window — its
+ * Monday 00:00 UTC is not before the prune cutoff (now − retentionDays). The
+ * second condition guards the upgrade case: an install adopting rollups with
+ * ~90 days of pre-existing hits has its oldest week(s) already partially
+ * pruned, and rolling those up would freeze a wrong partial count — they are
+ * skipped outright instead. Pure; unit-tested.
+ */
+export function eligibleWeeks(nowIso: string, weekStarts: string[], retentionDays: number): string[] {
+  const thisWeek = weekStartOf(nowIso);
+  const cutoff = new Date(Date.parse(nowIso) - retentionDays * DAY_MS).toISOString();
+  return weekStarts.filter((w) => w < thisWeek && `${w}T00:00:00.000Z` >= cutoff);
+}
+
+/**
+ * Aggregate aeo_hits into WRITE-ONCE weekly rollups. Runs each pipeline run,
+ * before the 90-day prune. A week's first rollup lands on the first run after
+ * it completes — while every one of its hits is still inside retention (the
+ * site tap only ever writes current timestamps, so nothing can arrive late
+ * into a past week) — so that first write is complete and final: INSERT OR
+ * IGNORE makes every later pass a no-op. Months later, when the prune starts
+ * eating into the week's raw hits, the frozen rollup is what survives — it is
+ * never REPLACEd with a shrinking recount. Weeks not entirely inside retention
+ * (possible only when the feature first runs against pre-existing old hits)
+ * are skipped rather than frozen wrong — see eligibleWeeks. bot/served
+ * coalesce to '' (never NULL) so the UNIQUE key actually dedupes (SQLite
+ * treats NULLs as distinct).
  */
 export async function rollupTelemetryWeekly(env: Env): Promise<void> {
   const rows = (
@@ -139,11 +159,9 @@ export async function rollupTelemetryWeekly(env: Env): Promise<void> {
   ).results;
   if (rows.length === 0) return;
 
-  const thisWeek = weekStartOf(new Date().toISOString());
   const agg = new Map<string, { week_start: string; kind: string; bot: string; served: string; hits: number }>();
   for (const r of rows) {
     const week = weekStartOf(r.ts);
-    if (week >= thisWeek) continue; // skip the in-progress (or any future-dated) week
     const bot = r.bot ?? '';
     const served = r.served ?? '';
     const key = `${week}|${r.kind}|${bot}|${served}`;
@@ -151,10 +169,13 @@ export async function rollupTelemetryWeekly(env: Env): Promise<void> {
     if (cur) cur.hits++;
     else agg.set(key, { week_start: week, kind: r.kind, bot, served, hits: 1 });
   }
-  if (agg.size === 0) return;
+  const weeks = [...new Set([...agg.values()].map((a) => a.week_start))];
+  const eligible = new Set(eligibleWeeks(new Date().toISOString(), weeks, RETENTION_DAYS));
+  const entries = [...agg.values()].filter((a) => eligible.has(a.week_start));
+  if (entries.length === 0) return;
 
-  const upsert = env.DB.prepare('INSERT OR REPLACE INTO aeo_weekly (week_start, kind, bot, served, hits) VALUES (?, ?, ?, ?, ?)');
-  const statements = [...agg.values()].map((a) => upsert.bind(a.week_start, a.kind, a.bot, a.served, a.hits));
+  const insert = env.DB.prepare('INSERT OR IGNORE INTO aeo_weekly (week_start, kind, bot, served, hits) VALUES (?, ?, ?, ?, ?)');
+  const statements = entries.map((a) => insert.bind(a.week_start, a.kind, a.bot, a.served, a.hits));
   for (let i = 0; i < statements.length; i += 500) {
     await env.DB.batch(statements.slice(i, i + 500));
   }
