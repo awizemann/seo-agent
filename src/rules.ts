@@ -47,6 +47,29 @@ export function validateTitle(text: string): string | null {
   return null;
 }
 
+export const keyOf = (path: string, rule: string): string => `${path} ${rule}`;
+
+/**
+ * Muted (path, rule) keys from a set of findings rows: a key is muted iff its
+ * MOST RECENT row (highest id) has status 'dismissed'. A later 'resolved' row
+ * (from a restore) or a later 'open' row un-mutes it. Pure and unit-tested.
+ *
+ * runRules feeds this the single latest row per key (a bounded SQL read), but it
+ * also collapses multi-row-per-key input correctly, so a test can pass a whole
+ * findings history and get the same answer.
+ */
+export function mutedKeys(rows: { id: number; path: string; rule: string; status: string }[]): Set<string> {
+  const latest = new Map<string, { id: number; status: string }>();
+  for (const r of rows) {
+    const k = keyOf(r.path, r.rule);
+    const cur = latest.get(k);
+    if (!cur || r.id > cur.id) latest.set(k, { id: r.id, status: r.status });
+  }
+  const muted = new Set<string>();
+  for (const [k, v] of latest) if (v.status === 'dismissed') muted.add(k);
+  return muted;
+}
+
 export async function runRules(
   env: Env,
   runId: number,
@@ -154,8 +177,21 @@ export async function runRules(
   const openRows = (
     await env.DB.prepare("SELECT id, path, rule FROM findings WHERE status = 'open'").all<{ id: number; path: string; rule: string }>()
   ).results;
-  const keyOf = (path: string, rule: string) => `${path} ${rule}`;
   const openKeys = new Map(openRows.map((r) => [keyOf(r.path, r.rule), r.id]));
+  // Muted keys: a (path, rule) a human dismissed. Skip inserting its triggered
+  // finding so a dismissal doesn't silently re-open every day. The subquery
+  // returns just the LATEST row per (path, rule); mutedKeys keeps those still
+  // 'dismissed' (a restore turns that row 'resolved', lifting the mute). The
+  // resolve loop below only walks openKeys, so it never touches dismissed rows.
+  const latestPerKey = (
+    await env.DB.prepare(
+      `SELECT f.id AS id, f.path AS path, f.rule AS rule, f.status AS status
+       FROM findings f
+       JOIN (SELECT path, rule, MAX(id) AS mid FROM findings GROUP BY path, rule) m
+         ON f.path = m.path AND f.rule = m.rule AND f.id = m.mid`
+    ).all<{ id: number; path: string; rule: string; status: string }>()
+  ).results;
+  const dismissedKeys = mutedKeys(latestPerKey);
   // Dedupe the triggered list within the run: duplicate sitemap entries (or a
   // self-join in duplicate_title) can push the same (path, rule) twice, which
   // would otherwise double-insert the same open finding. Keep first occurrence.
@@ -173,10 +209,11 @@ export async function runRules(
   const insert = env.DB.prepare('INSERT INTO findings (created_at, run_id, path, rule, severity, detail) VALUES (?, ?, ?, ?, ?, ?)');
   let opened = 0;
   for (const t of uniqueTriggered) {
-    if (!openKeys.has(keyOf(t.path, t.rule))) {
-      statements.push(insert.bind(now, runId, t.path, t.rule, t.severity, t.detail));
-      opened++;
-    }
+    const k = keyOf(t.path, t.rule);
+    if (openKeys.has(k)) continue; // already open — leave it
+    if (dismissedKeys.has(k)) continue; // muted — a human dismissed it; don't re-open
+    statements.push(insert.bind(now, runId, t.path, t.rule, t.severity, t.detail));
+    opened++;
   }
   const resolve = env.DB.prepare("UPDATE findings SET status = 'resolved', resolved_at = ? WHERE id = ?");
   let resolved = 0;

@@ -36,7 +36,18 @@ CREATE TABLE IF NOT EXISTS findings (
   rule TEXT NOT NULL,
   severity TEXT NOT NULL,     -- info | low | medium | high | critical
   detail TEXT,
-  status TEXT NOT NULL DEFAULT 'open',  -- open | resolved
+  -- open      = the condition is currently triggering.
+  -- resolved  = auto-closed by a later crawl when the condition cleared (or a
+  --             restored dismissal, re-openable on the next crawl).
+  -- dismissed = a human muted it: it leaves the open list AND future crawls
+  --             skip re-opening the same (path, rule) until it is restored (a
+  --             (path, rule) is muted iff its MOST RECENT row is 'dismissed').
+  -- Comment-enum, NOT a CHECK constraint (like every status column here) — so
+  -- adding 'dismissed' needs no migration; a fresh db:init just re-states it.
+  status TEXT NOT NULL DEFAULT 'open',  -- open | resolved | dismissed
+  -- Generic closed-at: the timestamp the row left 'open', whether by auto-resolve
+  -- OR by a dismissal. openFindingsSeries / the open counts treat it as the close
+  -- date, so a dismissed finding correctly drops out of "open" at dismissal time.
   resolved_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_findings_open ON findings (status, path, rule);

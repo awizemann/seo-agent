@@ -9,7 +9,10 @@
 import { applyOverride } from './overrides.js';
 import { siteConfig, type SiteConfig } from './config.js';
 
-const PROPOSABLE_RULES = new Set(['missing_description', 'short_description', 'long_description', 'truncated_description']);
+// The description-quality rules the AI drafting pipeline can fix. Exported so the
+// "Draft fix" action (actions.draftFinding) and the per-finding `draftable` flag
+// gate on the exact same set — a button that can't produce a draft never shows.
+export const PROPOSABLE_RULES = new Set(['missing_description', 'short_description', 'long_description', 'truncated_description']);
 const VALUE_MIN = 70;
 const VALUE_MAX = 160;
 

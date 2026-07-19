@@ -8,7 +8,7 @@ import { runCrawl, prunePageSnapshots } from './crawl.js';
 import { runRules, validateTitle, type Triggered } from './rules.js';
 import { aeoChecks } from './aeo.js';
 import { siteConfig } from './config.js';
-import { enqueueCandidates, draftWithTrace } from './propose.js';
+import { enqueueCandidates, draftWithTrace, PROPOSABLE_RULES } from './propose.js';
 import { ingestGsc } from './gsc.js';
 import { applyOverride, revertChange } from './overrides.js';
 import { telemetrySummary, telemetryFindings, pruneTelemetry, rollupTelemetryWeekly, listCrawlerHits as telemetryHits } from './telemetry.js';
@@ -245,17 +245,154 @@ export async function runCitationCheck(env: Env) {
   return runCitationProbes(env);
 }
 
+// A finding's remediation state — where the fix stands — derived from its LATEST
+// linked proposal (proposals.finding_id). `null` when there is no live work.
+export type RemediationState = 'proposal_pending' | 'applied_awaiting_recrawl' | 'proposal_rejected';
+export type Remediation = { state: RemediationState; proposalId: number } | null;
+
+/**
+ * Map a finding's latest proposal (by id) to its remediation state. Pure and
+ * unit-tested. Proposal status is authoritative on its own: revertChange flips a
+ * reverted proposal off 'approved' to 'reverted', so an 'approved' proposal
+ * always has a live (un-reverted) change — no changes-table join needed.
+ *   proposed  → proposal_pending          (a draft is awaiting a human decision)
+ *   approved  → applied_awaiting_recrawl  (fix is live; the finding clears next crawl)
+ *   rejected  → proposal_rejected
+ *   reverted / none → null                (no active remediation)
+ */
+export function remediationFor(p: { id: number; status: string } | undefined | null): Remediation {
+  if (!p) return null;
+  if (p.status === 'proposed') return { state: 'proposal_pending', proposalId: p.id };
+  if (p.status === 'approved') return { state: 'applied_awaiting_recrawl', proposalId: p.id };
+  if (p.status === 'rejected') return { state: 'proposal_rejected', proposalId: p.id };
+  return null;
+}
+
 export async function listFindings(env: Env, status = 'open') {
-  const rows = await env.DB.prepare(
-    `SELECT id, created_at, path, rule, severity, detail, status FROM findings WHERE status = ?
-     ORDER BY CASE severity
-       WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 WHEN 'info' THEN 4 ELSE 5
-     END, path
-     LIMIT 500`
+  const rows = (
+    await env.DB.prepare(
+      `SELECT id, created_at, path, rule, severity, detail, status FROM findings WHERE status = ?
+       ORDER BY CASE severity
+         WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 WHEN 'info' THEN 4 ELSE 5
+       END, path
+       LIMIT 500`
+    )
+      .bind(status)
+      .all<{ id: number; created_at: string; path: string; rule: string; severity: string; detail: string | null; status: string }>()
+  ).results;
+  if (rows.length === 0) return rows;
+
+  // Remediation: each finding's latest proposal by finding_id. The proposals
+  // table is small (drafted candidates only), so the latest-per-finding read is
+  // global and param-free rather than an IN-list over the (up to 500) findings.
+  const latestByFinding = new Map<number, { id: number; status: string }>();
+  const propRows = (
+    await env.DB.prepare(
+      `SELECT finding_id, id, status FROM proposals
+       WHERE finding_id IS NOT NULL AND id IN (
+         SELECT MAX(id) FROM proposals WHERE finding_id IS NOT NULL GROUP BY finding_id
+       )`
+    ).all<{ finding_id: number; id: number; status: string }>()
+  ).results;
+  for (const p of propRows) latestByFinding.set(p.finding_id, { id: p.id, status: p.status });
+
+  // Draftable: an OPEN finding on a description-fixable rule whose page has no
+  // live (proposed/approved) description proposal — the SAME idempotency the
+  // queue consumer enforces, so the "Draft fix" button can never fire a no-op.
+  const livePaths = new Set<string>();
+  if (status === 'open') {
+    const live = (
+      await env.DB.prepare("SELECT DISTINCT path FROM proposals WHERE field = 'description' AND status IN ('proposed', 'approved')").all<{
+        path: string;
+      }>()
+    ).results;
+    for (const r of live) livePaths.add(r.path);
+  }
+
+  return rows.map((f) => ({
+    ...f,
+    remediation: remediationFor(latestByFinding.get(f.id)),
+    draftable: status === 'open' && PROPOSABLE_RULES.has(f.rule) && !livePaths.has(f.path),
+  }));
+}
+
+/**
+ * Pure state-transition guard for dismiss/restore, so the 404/409 contract is
+ * pinned without a DB. Returns the error to throw, or null when the move is legal.
+ */
+export function findingTransitionError(
+  current: { status: string } | null | undefined,
+  want: 'dismiss' | 'restore'
+): { status: number; message: string } | null {
+  if (!current) return { status: 404, message: 'finding not found' };
+  const need = want === 'dismiss' ? 'open' : 'dismissed';
+  if (current.status !== need) {
+    const verb = want === 'dismiss' ? 'dismissed' : 'restored';
+    return { status: 409, message: `finding is ${current.status}, only ${need} findings can be ${verb}` };
+  }
+  return null;
+}
+
+/**
+ * Dismiss (mute) an OPEN finding. Sets status='dismissed' and stamps resolved_at
+ * (the generic closed-at) so it drops out of the open list and the open-findings
+ * series at dismissal time. Unlike auto-resolve, the mute holds: runRules skips
+ * re-opening a dismissed (path, rule) until it is restored.
+ */
+export async function dismissFinding(env: Env, id: number) {
+  const f = await env.DB.prepare('SELECT id, status FROM findings WHERE id = ?').bind(id).first<{ id: number; status: string }>();
+  const err = findingTransitionError(f, 'dismiss');
+  if (err) throw new ApiError(err.message, err.status);
+  const now = new Date().toISOString();
+  // The status guard in the UPDATE makes a double-click / race a no-op, not a
+  // second stamp.
+  await env.DB.prepare("UPDATE findings SET status = 'dismissed', resolved_at = ? WHERE id = ? AND status = 'open'").bind(now, id).run();
+  console.log(JSON.stringify({ evt: 'finding_dismissed', id }));
+  return { ok: true, id, status: 'dismissed' };
+}
+
+/**
+ * Restore a DISMISSED finding: flip it to 'resolved' (lifting the mute). It does
+ * NOT re-open here — the next crawl re-opens it naturally if the condition still
+ * holds, which keeps "open" meaning "currently triggering".
+ */
+export async function restoreFinding(env: Env, id: number) {
+  const f = await env.DB.prepare('SELECT id, status FROM findings WHERE id = ?').bind(id).first<{ id: number; status: string }>();
+  const err = findingTransitionError(f, 'restore');
+  if (err) throw new ApiError(err.message, err.status);
+  const now = new Date().toISOString();
+  await env.DB.prepare("UPDATE findings SET status = 'resolved', resolved_at = ? WHERE id = ? AND status = 'dismissed'").bind(now, id).run();
+  console.log(JSON.stringify({ evt: 'finding_restored', id }));
+  return { ok: true, id, status: 'resolved', note: 're-opens on the next crawl if the condition still holds' };
+}
+
+/**
+ * "Draft fix": enqueue an AI meta-description draft for an OPEN, description-
+ * fixable finding by sending the exact job the pipeline's candidate selection
+ * would — the queue consumer (draftAndCreate) creates the proposal. Reuses the
+ * consumer's path-level idempotency, so this is a no-op when a live proposal
+ * already exists.
+ */
+export async function draftFinding(env: Env, id: number) {
+  const f = await env.DB.prepare('SELECT id, path, rule, status FROM findings WHERE id = ?')
+    .bind(id)
+    .first<{ id: number; path: string; rule: string; status: string }>();
+  if (!f) throw new ApiError('finding not found', 404);
+  if (f.status !== 'open') throw new ApiError(`finding is ${f.status}, only open findings can be drafted`, 409);
+  if (!PROPOSABLE_RULES.has(f.rule)) throw new ApiError(`rule ${f.rule} is not one the drafting pipeline can fix`, 400);
+  const existing = await env.DB.prepare(
+    "SELECT 1 FROM proposals WHERE path = ? AND field = 'description' AND status IN ('proposed', 'approved') LIMIT 1"
   )
-    .bind(status)
-    .all();
-  return rows.results;
+    .bind(f.path)
+    .first();
+  if (existing) return { ok: true, enqueued: 0, note: 'a proposal for this page is already live' };
+  const snap = await env.DB.prepare('SELECT title, description FROM page_snapshots WHERE path = ? ORDER BY id DESC LIMIT 1')
+    .bind(f.path)
+    .first<{ title: string | null; description: string | null }>();
+  if (!snap) throw new ApiError('no snapshot for that path — run a crawl first', 404);
+  await env.DRAFT_QUEUE.send({ findingId: f.id, path: f.path, rule: f.rule, title: snap.title, current: snap.description });
+  console.log(JSON.stringify({ evt: 'finding_draft_enqueued', id, path: f.path }));
+  return { ok: true, enqueued: 1, note: 'draft queued — the proposal appears within ~1–2 min' };
 }
 
 export async function listProposals(env: Env, status = 'proposed') {

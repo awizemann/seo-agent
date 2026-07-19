@@ -15,6 +15,8 @@ import {
   startRun,
   statusData,
   listFindings,
+  dismissFinding,
+  restoreFinding,
   listProposals,
   decideProposal,
   createProposal,
@@ -58,12 +60,27 @@ const TOOLS: Tool[] = [
   },
   {
     name: 'list_findings',
-    description: 'List rule findings. Findings auto-resolve when their condition stops triggering on a later crawl.',
+    description:
+      'List rule findings, each with a `remediation` state derived from its latest linked proposal (proposal_pending / applied_awaiting_recrawl / proposal_rejected / null) and a `draftable` flag. Findings auto-resolve when their condition stops triggering on a later crawl; dismiss_finding mutes one until restore_finding.',
     inputSchema: {
       type: 'object',
-      properties: { status: { type: 'string', enum: ['open', 'resolved'], description: 'Default: open' } },
+      properties: { status: { type: 'string', enum: ['open', 'resolved', 'dismissed'], description: 'Default: open' } },
     },
     handler: (env, a) => listFindings(env, a.status || 'open'),
+  },
+  {
+    name: 'dismiss_finding',
+    description:
+      'Dismiss (mute) an open finding: it leaves the open list and — unlike auto-resolve — future crawls will not re-open the same (path, rule) until restore_finding. Use for a deliberate, permanent state (e.g. a page you removed on purpose). Errors 409 unless the finding is open, 404 if unknown.',
+    inputSchema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] },
+    handler: (env, a) => dismissFinding(env, Number(a.id)),
+  },
+  {
+    name: 'restore_finding',
+    description:
+      'Restore a dismissed finding: lifts the mute (marks it resolved) so the next crawl re-opens it if the condition still holds. Errors 409 unless the finding is dismissed, 404 if unknown.',
+    inputSchema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] },
+    handler: (env, a) => restoreFinding(env, Number(a.id)),
   },
   {
     name: 'list_proposals',

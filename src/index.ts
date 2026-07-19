@@ -16,6 +16,9 @@ import {
   startRun,
   statusData,
   listFindings,
+  dismissFinding,
+  restoreFinding,
+  draftFinding,
   listProposals,
   decideProposal,
   createProposal,
@@ -87,6 +90,17 @@ export default {
         return json(r, r.started ? 202 : 409);
       }
       if (method === 'GET' && pathname === '/findings') return json(await listFindings(env, url.searchParams.get('status') || 'open'));
+
+      // Per-finding lifecycle actions: dismiss (mute) an open finding, restore a
+      // dismissed one, or enqueue an AI draft for a description-fixable finding.
+      const findingAction = pathname.match(/^\/findings\/(\d+)\/(dismiss|restore|draft)$/);
+      if (method === 'POST' && findingAction) {
+        const fid = parseInt(findingAction[1], 10);
+        if (findingAction[2] === 'dismiss') return json(await dismissFinding(env, fid));
+        if (findingAction[2] === 'restore') return json(await restoreFinding(env, fid));
+        return json(await draftFinding(env, fid));
+      }
+
       if (method === 'GET' && pathname === '/proposals') return json(await listProposals(env, url.searchParams.get('status') || 'proposed'));
 
       // Manual proposal creation — e.g. promoting a dry-run winner. Goes

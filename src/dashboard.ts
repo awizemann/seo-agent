@@ -96,6 +96,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-right: 4px; }
   .cit-cell { height: 16px; border-radius: 2px; background: var(--chip); }
   .chip.helped { color: var(--ok); } .chip.hurt { color: var(--bad); } .chip.neutral { color: var(--muted); }
+  .chip.applied { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
   .chip.insufficient_data, .chip.pending { color: var(--muted); background: transparent; border: 1px solid var(--line); }
   .chip.insufficient_data { border-style: dashed; }
   /* Tab bar — anchor links driven by the URL hash; scrolls horizontally when narrow. */
@@ -189,7 +190,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   // In-memory model of the core payloads, so tab switches and post-action badge
   // updates never have to refetch. analyticsData is the deferred /analytics
   // payload, cached for the session (nulled after a mutation that invalidates it).
-  var state = { status: null, proposals: [], findings: [], changes: [] };
+  var state = { status: null, proposals: [], findings: [], changes: [], dismissed: [] };
   var analyticsData = null;
   var analyticsPending = false;
 
@@ -328,14 +329,44 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
       : '<div class="empty">No proposals awaiting review. The daily run drafts up to a few at a time.</div>';
   }
 
-  function renderFindings(list) {
-    if (!list.length) { el('findings').innerHTML = '<div class="empty">None — all clear.</div>'; return; }
-    var rows = list.map(function (f) {
-      return '<tr><td><span class="chip ' + esc(f.severity) + '">' + esc(f.severity) + '</span></td>'
-        + '<td>' + esc(f.rule) + '</td><td>' + esc(f.path) + '</td>'
-        + '<td class="muted">' + esc((f.detail || '').slice(0, 120)) + '</td></tr>';
-    }).join('');
-    el('findings').innerHTML = '<div class="tablewrap"><table><thead><tr><th>Sev</th><th>Rule</th><th>Path</th><th>Detail</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+  // Remediation cell: a live queue-state hint per finding. Only the two active
+  // states render (a link to the pending proposal, or an "applied" chip);
+  // rejected / none show nothing, so the column stays quiet on the common case.
+  function remedCell(f) {
+    var r = f.remediation;
+    if (!r) return '';
+    if (r.state === 'proposal_pending') return '<a href="#proposals">proposal pending</a>';
+    if (r.state === 'applied_awaiting_recrawl') return '<span class="chip applied">fix applied — confirming next crawl</span>';
+    return '';
+  }
+  function renderFindings(open, dismissed) {
+    open = open || []; dismissed = dismissed || [];
+    var html = '';
+    if (!open.length) {
+      html += '<div class="empty">None — all clear.</div>';
+    } else {
+      var rows = open.map(function (f) {
+        var draft = f.draftable ? '<button class="small" data-act="draft" data-id="' + f.id + '">Draft fix</button> ' : '';
+        return '<tr data-fid="' + f.id + '"><td><span class="chip ' + esc(f.severity) + '">' + esc(f.severity) + '</span></td>'
+          + '<td>' + esc(f.rule) + '</td><td>' + esc(f.path) + '</td>'
+          + '<td class="muted">' + esc((f.detail || '').slice(0, 120)) + '</td>'
+          + '<td>' + remedCell(f) + '</td>'
+          + '<td style="white-space:nowrap;text-align:right">' + draft
+          + '<button class="small bad" data-act="dismiss" data-id="' + f.id + '">Dismiss</button></td></tr>';
+      }).join('');
+      html += '<div class="tablewrap"><table><thead><tr><th>Sev</th><th>Rule</th><th>Path</th><th>Detail</th><th>Remediation</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    }
+    if (dismissed.length) {
+      var drows = dismissed.map(function (f) {
+        return '<tr data-fid="' + f.id + '"><td><span class="chip ' + esc(f.severity) + '">' + esc(f.severity) + '</span></td>'
+          + '<td>' + esc(f.rule) + '</td><td>' + esc(f.path) + '</td>'
+          + '<td class="muted">' + esc((f.detail || '').slice(0, 120)) + '</td>'
+          + '<td style="text-align:right"><button class="small" data-act="restore" data-id="' + f.id + '">Restore</button></td></tr>';
+      }).join('');
+      html += '<details style="margin-top:16px"><summary>Dismissed (' + dismissed.length + ')</summary>'
+        + '<div class="tablewrap"><table><thead><tr><th>Sev</th><th>Rule</th><th>Path</th><th>Detail</th><th></th></tr></thead><tbody>' + drows + '</tbody></table></div></details>';
+    }
+    el('findings').innerHTML = html;
   }
 
   // Verdicts live only in the /analytics payload, so the Changes table sources
@@ -395,6 +426,49 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
       analyticsData = null;
       load();
     }).catch(function (e) { toast(e.message); });
+  }
+  // Disable a finding row's buttons while its action is in flight.
+  function lockRow(id) {
+    var tr = document.querySelector('tr[data-fid="' + id + '"]');
+    if (tr) Array.prototype.forEach.call(tr.querySelectorAll('button'), function (x) { x.disabled = true; });
+  }
+  function dismiss(id) {
+    lockRow(id);
+    api('/findings/' + id + '/dismiss', { method: 'POST' }).then(function () {
+      toast('Finding #' + id + ' dismissed');
+      // Optimistic: move it out of the open list into the dismissed list, drop
+      // the badge, and refresh. A dismissal also closes an open-findings series
+      // row, so the cached analytics is stale — invalidate it.
+      var moved = null;
+      state.findings = (state.findings || []).filter(function (f) { if (f.id === id) { moved = f; return false; } return true; });
+      if (moved) state.dismissed = [moved].concat(state.dismissed || []);
+      renderFindings(state.findings, state.dismissed); updateBadges();
+      analyticsData = null;
+      load();
+    }).catch(function (e) { toast(e.message); load(); });
+  }
+  function restore(id) {
+    lockRow(id);
+    api('/findings/' + id + '/restore', { method: 'POST' }).then(function () {
+      // Restore lifts the mute but does NOT re-open — the next crawl does, if the
+      // condition still holds. So the row just leaves the Dismissed list here.
+      toast('Finding #' + id + ' restored — re-opens next crawl if still present');
+      state.dismissed = (state.dismissed || []).filter(function (f) { return f.id !== id; });
+      renderFindings(state.findings, state.dismissed);
+      analyticsData = null;
+      load();
+    }).catch(function (e) { toast(e.message); load(); });
+  }
+  function draftFix(id) {
+    lockRow(id);
+    api('/findings/' + id + '/draft', { method: 'POST' }).then(function (r) {
+      toast(r.enqueued ? 'Draft queued — proposal appears shortly' : (r.note || 'Already drafted'));
+      // The queue consumer creates the proposal over the next ~1–2 min; refresh
+      // a couple of times so it surfaces (and the row's remediation updates).
+      load();
+      setTimeout(load, 15000);
+      setTimeout(load, 35000);
+    }).catch(function (e) { toast(e.message); load(); });
   }
   function resetRunBtn() { var b = el('runbtn'); b.disabled = false; b.textContent = 'Run pipeline'; }
   function runPipeline() {
@@ -463,6 +537,9 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
     else if (act === 'approve') decide(Number(id), 'approve');
     else if (act === 'reject') decide(Number(id), 'reject');
     else if (act === 'revert') revert(Number(id));
+    else if (act === 'dismiss') dismiss(Number(id));
+    else if (act === 'restore') restore(Number(id));
+    else if (act === 'draft') draftFix(Number(id));
   });
   el('tok').addEventListener('keydown', function (e) { if (e.key === 'Enter') doLogin(); });
   window.addEventListener('hashchange', onHashChange);
@@ -630,12 +707,12 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   // actions and after a pipeline run; tab switches never call it.
   function load() {
     Promise.all([
-      api('/status'), api('/proposals?status=proposed'), api('/findings?status=open'), api('/changes')
+      api('/status'), api('/proposals?status=proposed'), api('/findings?status=open'), api('/changes'), api('/findings?status=dismissed')
     ]).then(function (res) {
-      state.status = res[0]; state.proposals = res[1]; state.findings = res[2]; state.changes = res[3];
+      state.status = res[0]; state.proposals = res[1]; state.findings = res[2]; state.changes = res[3]; state.dismissed = res[4];
       renderCards(res[0]);
       renderProposals(res[1]);
-      renderFindings(res[2]);
+      renderFindings(res[2], res[4]);
       renderChanges(res[3]);
       updateBadges();
       // If the user is already on a tab that needs analytics, (re)load it —

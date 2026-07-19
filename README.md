@@ -464,6 +464,48 @@ tables — never 500):
 `npm run db:init` (idempotent) once to create them — until then the analytics
 endpoints degrade to empty rather than error.
 
+## Findings lifecycle
+
+Findings are **sensors, not tickets**. Each is a persistent condition keyed
+`(path, rule)`: it opens the first run its condition triggers, stays open while it
+keeps triggering, and **auto-resolves** the first run it stops — no one closes a
+finding by hand in the common case. Event-style rules (`new_page` / `removed_page`)
+resolve the same way on the following run.
+
+**Remediation state.** Every listed finding carries a `remediation` field derived
+from its latest linked proposal (`proposals.finding_id`), so the wall of findings
+reads as a live queue:
+
+| `remediation.state` | Meaning | Dashboard |
+| --- | --- | --- |
+| `proposal_pending` | A draft is awaiting a human decision | "proposal pending" → links to the Proposals tab |
+| `applied_awaiting_recrawl` | The fix is live; the finding clears on the next crawl | "fix applied — confirming next crawl" chip |
+| `proposal_rejected` | The latest proposal was rejected | — |
+| `null` | No active remediation (none, or reverted) | — |
+
+Proposal status alone is authoritative: reverting a change flips its proposal off
+`approved` to `reverted`, so an `approved` proposal always has a live change.
+
+**Dismiss = mute until restored.** Auto-resolve is for conditions that *cleared*.
+For a finding that is real but you never intend to act on (e.g. a `removed_page`
+for a page you deleted on purpose), **dismiss** it: it leaves the open list and,
+unlike auto-resolve, future crawls will **not** re-open the same `(path, rule)`.
+A `(path, rule)` is muted iff its most recent findings row is `dismissed`;
+**restore** flips that row to `resolved`, lifting the mute so the next crawl
+re-opens it if the condition still holds. This needs **zero schema change** — it
+reuses `status` (a comment-enum, never a CHECK constraint) and `resolved_at` (the
+generic closed-at, so a dismissed finding drops out of the open-count series at
+dismissal time). Open counts, the Findings badge, and the open-findings series all
+count `open` only.
+
+- `POST /findings/:id/dismiss` — mute an open finding (409 unless open, 404 unknown)
+- `POST /findings/:id/restore` — un-mute a dismissed finding (409 unless dismissed)
+- `POST /findings/:id/draft` — **Draft fix**: for an open, description-fixable
+  finding with no live proposal, enqueue the same drafting job the pipeline would;
+  the queue consumer creates the proposal (idempotent — a no-op if one already exists)
+- **MCP:** `dismiss_finding`, `restore_finding`; `list_findings` gains a `dismissed`
+  status and returns `remediation` + `draftable` on every row.
+
 ## Review dashboard
 
 A self-contained human UI is served by the Worker itself at **`GET /`** (and
@@ -479,7 +521,10 @@ whitelist, never string-interpolated):
   GSC freshness / AI crawls / AI referrals / cited) and the last-run line. Every
   card is a link that routes into the tab that drills into it.
 - **Findings** (`#findings`) — the open-findings table (severity / rule / path /
-  detail). The tab label carries a live open-count badge.
+  detail / remediation), each row with a **Dismiss** action (and a **Draft fix**
+  button on description-fixable findings with no live proposal), plus a collapsed
+  **Dismissed (n)** section with **Restore**. The tab label carries a live
+  open-count badge. See [Findings lifecycle](#findings-lifecycle).
 - **Proposals** (`#proposals`) — pending proposals with a strikethrough
   current-vs-proposed diff and per-item approve / reject, plus the on-demand
   dry-run drafter (draft a description, then promote it to a proposal). The tab
@@ -513,10 +558,11 @@ claude mcp add --transport http seo-agent https://<worker-host>/mcp \
 Any Claude session can then drive the agent conversationally — "what did the SEO
 agent find overnight?", "approve proposal 7", "draft me three alternatives for
 /press", "which AI bots crawled us this week?", "did change 12 help or hurt?" —
-via the 16 tools: `seo_status`, `run_pipeline`, `list_findings`, `list_proposals`,
-`approve_proposal`, `reject_proposal`, `create_proposal`, `dry_run_draft`,
-`list_changes`, `revert_change`, `list_overrides`, `list_crawler_hits`,
-`list_citations`, `run_citation_check`, `get_analytics`, `get_change_impact`.
+via the 18 tools: `seo_status`, `run_pipeline`, `list_findings`, `dismiss_finding`,
+`restore_finding`, `list_proposals`, `approve_proposal`, `reject_proposal`,
+`create_proposal`, `dry_run_draft`, `list_changes`, `revert_change`,
+`list_overrides`, `list_crawler_hits`, `list_citations`, `run_citation_check`,
+`get_analytics`, `get_change_impact`.
 
 ## Control API
 
@@ -526,7 +572,10 @@ All endpoints require `Authorization: Bearer <AGENT_TOKEN>` (the MCP endpoint to
 | --- | --- |
 | `GET /status` | Last run, open findings by severity, proposals by status, change counts, GSC freshness |
 | `POST /run` | Run the full pipeline now |
-| `GET /findings?status=open` | Findings (default open) |
+| `GET /findings?status=open` | Findings (default open; also `resolved` / `dismissed`), each with `remediation` + `draftable` |
+| `POST /findings/:id/dismiss` | Mute an open finding (leaves the open list; future crawls won't re-open it) |
+| `POST /findings/:id/restore` | Un-mute a dismissed finding (re-opens on the next crawl if still triggering) |
+| `POST /findings/:id/draft` | Enqueue an AI draft for a description-fixable finding with no live proposal |
 | `GET /proposals?status=proposed` | Proposals (default awaiting review) |
 | `POST /proposals` `{"path", "value", "field"?, "rationale"?}` | Create a manual proposal (e.g. promote a dry-run winner); same validation and approval gate |
 | `POST /proposals/:id/approve` | Apply to the live site via KV override (journaled) |
