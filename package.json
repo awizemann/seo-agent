@@ -1,6 +1,6 @@
 {
   "name": "seo-agent",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "An automated, Cloudflare-based SEO agent for large content sites.",
   "type": "module",
   "license": "MIT",
@@ -14,10 +14,12 @@
     "check": "npm run types && tsc",
     "dev": "wrangler dev",
     "deploy": "npm run check && wrangler deploy",
-    "db:init": "wrangler d1 execute seo-agent-db --remote --file schema.sql"
+    "db:init": "wrangler d1 execute seo-agent-db --remote --file schema.sql",
+    "test": "vitest run"
   },
   "devDependencies": {
     "typescript": "^5.8.3",
+    "vitest": "^4.1.10",
     "wrangler": "^4.45.4"
   }
 }
