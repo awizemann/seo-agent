@@ -78,6 +78,15 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   .spin { display: inline-block; width: 13px; height: 13px; border: 2px solid var(--muted); border-top-color: transparent;
     border-radius: 50%; animation: s .7s linear infinite; vertical-align: -2px; }
   @keyframes s { to { transform: rotate(360deg); } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 10px; box-shadow: var(--shadow); }
+  .panel h3 { font-size: 13px; margin: 0 0 8px; font-weight: 600; }
+  .svgwrap { width: 100%; overflow-x: auto; }
+  .legend { font-size: 11px; color: var(--muted); display: flex; gap: 12px; flex-wrap: wrap; margin-top: 6px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-right: 4px; }
+  .cit-cell { height: 16px; border-radius: 2px; background: var(--chip); }
+  .chip.helped { color: var(--ok); } .chip.hurt { color: var(--bad); } .chip.neutral { color: var(--muted); }
+  .chip.insufficient_data, .chip.pending { color: var(--muted); background: transparent; border: 1px solid var(--line); }
+  .chip.insufficient_data { border-style: dashed; }
 </style>
 </head>
 <body>
@@ -102,6 +111,11 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   <div id="lastrun" class="muted" style="font-size:12px"></div>
 
   <div class="cards" id="cards"></div>
+
+  <section id="analyticsSection">
+    <h2>Analytics</h2>
+    <div id="analytics"></div>
+  </section>
 
   <section>
     <h2>Pending proposals</h2>
@@ -337,11 +351,162 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   });
   el('tok').addEventListener('keydown', function (e) { if (e.key === 'Enter') doLogin(); });
 
+  // --- Analytics section: client-side inline-SVG charts over /analytics/summary.
+  // Kept dependency-free and template-literal-free like the rest of this script.
+  function dnum(x) { return String(Math.round(x == null ? 0 : x)).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+  function dayDiff(a, b) { return Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 86400000); }
+  function panel(title, inner) { return '<div class="panel"><h3>' + esc(title) + '</h3>' + inner + '</div>'; }
+
+  function buildGsc(g, changes) {
+    var daily = (g && g.daily) || [];
+    if (!daily.length) return panel('Search clicks & impressions (90d)', '<div class="empty">No GSC data yet.</div>');
+    var W = 860, H = 210, PL = 46, PR = 46, PT = 16, PB = 24;
+    var first = daily[0].date, last = daily[daily.length - 1].date;
+    var span = Math.max(1, dayDiff(first, last));
+    var maxC = 1, maxI = 1;
+    daily.forEach(function (d) { maxC = Math.max(maxC, d.clicks); maxI = Math.max(maxI, d.impressions); });
+    function X(date) { return PL + (dayDiff(first, date) / span) * (W - PL - PR); }
+    function YC(v) { return PT + (1 - v / maxC) * (H - PT - PB); }
+    function YI(v) { return PT + (1 - v / maxI) * (H - PT - PB); }
+    var clicksPts = daily.map(function (d) { return X(d.date).toFixed(1) + ',' + YC(d.clicks).toFixed(1); }).join(' ');
+    var imprPts = daily.map(function (d) { return X(d.date).toFixed(1) + ',' + YI(d.impressions).toFixed(1); }).join(' ');
+    var ticks = (changes || []).map(function (c) {
+      var dt = (c.applied_at || '').slice(0, 10);
+      if (dt < first || dt > last) return '';
+      var x = X(dt).toFixed(1);
+      return '<line x1="' + x + '" y1="' + PT + '" x2="' + x + '" y2="' + (H - PB) + '" style="stroke:var(--muted)" stroke-dasharray="2 2" opacity="0.5"><title>change #' + c.id + ' ' + esc(c.field) + ' ' + dt + '</title></line>';
+    }).join('');
+    var w = (W - PL - PR) / Math.max(1, daily.length);
+    var hovers = daily.map(function (d) {
+      return '<rect x="' + (X(d.date) - w / 2).toFixed(1) + '" y="' + PT + '" width="' + w.toFixed(1) + '" height="' + (H - PT - PB) + '" fill="transparent"><title>' + d.date + ' — ' + dnum(d.clicks) + ' clicks, ' + dnum(d.impressions) + ' impressions, CTR ' + (d.ctr * 100).toFixed(1) + '%, pos ' + d.position.toFixed(1) + '</title></rect>';
+    }).join('');
+    var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:auto" preserveAspectRatio="xMidYMid meet">'
+      + '<text x="' + PL + '" y="11" style="fill:var(--accent)" font-size="10">clicks (L)</text>'
+      + '<text x="' + (W - PR) + '" y="11" text-anchor="end" style="fill:var(--warn)" font-size="10">impressions (R)</text>'
+      + ticks
+      + '<polyline points="' + imprPts + '" fill="none" style="stroke:var(--warn)" stroke-width="1.5"/>'
+      + '<polyline points="' + clicksPts + '" fill="none" style="stroke:var(--accent)" stroke-width="1.5"/>'
+      + '<text x="2" y="' + (PT + 4) + '" style="fill:var(--muted)" font-size="9">' + dnum(maxC) + '</text>'
+      + '<text x="' + (W - 2) + '" y="' + (PT + 4) + '" text-anchor="end" style="fill:var(--muted)" font-size="9">' + dnum(maxI) + '</text>'
+      + '<text x="' + PL + '" y="' + (H - 2) + '" style="fill:var(--muted)" font-size="9">' + first + '</text>'
+      + '<text x="' + (W - PR) + '" y="' + (H - 2) + '" text-anchor="end" style="fill:var(--muted)" font-size="9">' + last + '</text>'
+      + hovers + '</svg>';
+    return panel('Search clicks & impressions (90d)', '<div class="svgwrap">' + svg + '</div>');
+  }
+
+  function buildAeo(a) {
+    var daily = (a && a.daily) || [], bots = (a && a.topBots7d) || [];
+    if (!daily.length && !bots.length) return panel('AI traffic (30d)', '<div class="empty">No AI-traffic telemetry yet.</div>');
+    var inner = '';
+    if (daily.length) {
+      var W = 860, H = 170, PL = 30, PR = 10, PT = 12, PB = 22;
+      var max = 1;
+      daily.forEach(function (d) { max = Math.max(max, (d.crawler || 0) + (d.referral || 0) + (d.agent || 0)); });
+      var bw = (W - PL - PR) / daily.length;
+      var bars = daily.map(function (d, i) {
+        var x = PL + i * bw, y = H - PB, out = '';
+        [['crawler', d.crawler || 0, 'var(--accent)'], ['referral', d.referral || 0, 'var(--ok)'], ['agent', d.agent || 0, 'var(--warn)']].forEach(function (s) {
+          var h = (s[1] / max) * (H - PT - PB); y -= h;
+          if (h > 0) out += '<rect x="' + (x + 1).toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + Math.max(1, bw - 2).toFixed(1) + '" height="' + h.toFixed(1) + '" style="fill:' + s[2] + '"/>';
+        });
+        out += '<rect x="' + x.toFixed(1) + '" y="' + PT + '" width="' + bw.toFixed(1) + '" height="' + (H - PT - PB) + '" fill="transparent"><title>' + d.date + ' — ' + (d.crawler || 0) + ' crawler, ' + (d.referral || 0) + ' referral, ' + (d.agent || 0) + ' agent</title></rect>';
+        return out;
+      }).join('');
+      inner += '<div class="svgwrap"><svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:auto" preserveAspectRatio="xMidYMid meet">'
+        + '<text x="2" y="' + (PT + 8) + '" style="fill:var(--muted)" font-size="9">' + max + '</text>'
+        + '<text x="' + PL + '" y="' + (H - 2) + '" style="fill:var(--muted)" font-size="9">' + daily[0].date + '</text>'
+        + '<text x="' + (W - PR) + '" y="' + (H - 2) + '" text-anchor="end" style="fill:var(--muted)" font-size="9">' + daily[daily.length - 1].date + '</text>'
+        + bars + '</svg></div>'
+        + '<div class="legend"><span><i style="background:var(--accent)"></i>crawler</span><span><i style="background:var(--ok)"></i>referral</span><span><i style="background:var(--warn)"></i>agent</span></div>';
+    }
+    if (bots.length) {
+      inner += '<div class="muted" style="font-size:12px;margin-top:8px">Top AI bots (7d): '
+        + bots.map(function (b) { return esc(b.bot) + ' (' + b.hits + ')'; }).join(', ') + '</div>';
+    }
+    return panel('AI traffic (30d)', inner);
+  }
+
+  function buildCitations(c) {
+    var series = (c && c.series) || [];
+    if (!series.length) return panel('Citations', '<div class="empty">' + ((c && c.active) ? 'Configured — no probes recorded yet (they run weekly).' : 'Citation probes not configured.') + '</div>');
+    var dates = [], seen = {};
+    series.forEach(function (r) { var d = (r.checked_at || '').slice(0, 10); if (!seen[d]) { seen[d] = 1; dates.push(d); } });
+    dates.sort();
+    var keys = [], kseen = {}, cell = {};
+    series.forEach(function (r) {
+      var k = r.engine + ' · ' + r.query;
+      if (!kseen[k]) { kseen[k] = 1; keys.push(k); }
+      cell[k + '|' + (r.checked_at || '').slice(0, 10)] = r;
+    });
+    var rowsHtml = keys.map(function (k) {
+      var cells = dates.map(function (d) {
+        var r = cell[k + '|' + d];
+        if (!r) return '<span class="cit-cell" title="' + esc(k) + ' ' + d + ': no probe"></span>';
+        var cited = r.cited == 1 || r.cited === true;
+        var t = esc(k) + ' ' + d + ': ' + (cited ? ('cited (rank ' + (r.rank || '?') + ')') : 'not cited');
+        return '<span class="cit-cell"' + (cited ? ' style="background:var(--ok)"' : '') + ' title="' + t + '"></span>';
+      }).join('');
+      return '<div style="display:flex;gap:6px;align-items:center;margin-bottom:2px"><span class="muted" style="font-size:11px;min-width:210px;max-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(k) + '">' + esc(k) + '</span><span style="display:grid;grid-auto-flow:column;grid-auto-columns:minmax(6px,1fr);gap:2px;flex:1">' + cells + '</span></div>';
+    }).join('');
+    return panel('Citations (' + dates.length + ' checks)', '<div class="svgwrap">' + rowsHtml + '</div>');
+  }
+
+  function buildFindings(f) {
+    var s = (f && f.series) || [];
+    var any = s.some(function (d) { return d.total > 0; });
+    if (!s.length || !any) return panel('Open findings over time (90d)', '<div class="empty">No open findings in the window.</div>');
+    var W = 860, H = 150, PL = 30, PR = 10, PT = 12, PB = 22;
+    var max = 1; s.forEach(function (d) { max = Math.max(max, d.total); });
+    var span = Math.max(1, s.length - 1);
+    function X(i) { return PL + (i / span) * (W - PL - PR); }
+    function Y(v) { return PT + (1 - v / max) * (H - PT - PB); }
+    var line = s.map(function (d, i) { return X(i).toFixed(1) + ',' + Y(d.total).toFixed(1); }).join(' ');
+    var area = PL + ',' + (H - PB) + ' ' + line + ' ' + (W - PR) + ',' + (H - PB);
+    var w = (W - PL - PR) / Math.max(1, s.length);
+    var hovers = s.map(function (d, i) {
+      var br = [];
+      ['critical', 'high', 'medium', 'low', 'info'].forEach(function (sev) { var n = (d.counts && d.counts[sev]) || 0; if (n) br.push(n + ' ' + sev); });
+      return '<rect x="' + (X(i) - w / 2).toFixed(1) + '" y="' + PT + '" width="' + w.toFixed(1) + '" height="' + (H - PT - PB) + '" fill="transparent"><title>' + d.date + ' — ' + d.total + ' open' + (br.length ? (' (' + br.join(', ') + ')') : '') + '</title></rect>';
+    }).join('');
+    var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:auto" preserveAspectRatio="xMidYMid meet">'
+      + '<polygon points="' + area + '" style="fill:var(--warn)" opacity="0.15"/>'
+      + '<polyline points="' + line + '" fill="none" style="stroke:var(--warn)" stroke-width="1.5"/>'
+      + '<text x="2" y="' + (PT + 8) + '" style="fill:var(--muted)" font-size="9">' + max + '</text>'
+      + '<text x="' + PL + '" y="' + (H - 2) + '" style="fill:var(--muted)" font-size="9">' + s[0].date + '</text>'
+      + '<text x="' + (W - PR) + '" y="' + (H - 2) + '" text-anchor="end" style="fill:var(--muted)" font-size="9">' + s[s.length - 1].date + '</text>'
+      + hovers + '</svg>';
+    return panel('Open findings over time (90d)', '<div class="svgwrap">' + svg + '</div>');
+  }
+
+  function buildChangesTable(list) {
+    if (!list || !list.length) return panel('Changes & impact', '<div class="empty">No changes applied yet.</div>');
+    var rows = list.map(function (c) {
+      var v = c.latestVerdict || 'pending';
+      var label = (c.latestPhase ? (c.latestPhase + ' ') : '') + String(v).replace('_', ' ');
+      var chip = '<span class="chip ' + esc(v) + '">' + esc(label) + '</span>';
+      var action = c.reverted_at ? '<span class="muted">reverted</span>' : '<button class="bad small" data-act="revert" data-id="' + c.id + '">Revert</button>';
+      return '<tr style="' + (c.reverted_at ? 'opacity:.55' : '') + '"><td>' + c.id + '</td><td>' + esc(c.path) + '</td><td>' + esc(c.field) + '</td><td class="muted">' + esc((c.applied_at || '').slice(0, 10)) + '</td><td>' + chip + '</td><td>' + action + '</td></tr>';
+    }).join('');
+    return panel('Changes & impact', '<table><thead><tr><th>#</th><th>Path</th><th>Field</th><th>Applied</th><th>Verdict</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>');
+  }
+
+  function renderAnalytics(data) {
+    data = data || {};
+    var html = '';
+    if (data.gsc && data.gsc.active) html += buildGsc(data.gsc, data.changes);
+    html += buildAeo(data.aeo);
+    html += buildCitations(data.citations);
+    html += buildFindings(data.findings);
+    html += buildChangesTable(data.changes);
+    el('analytics').innerHTML = html;
+  }
+
   function load() {
     Promise.all([
-      api('/status'), api('/proposals?status=proposed'), api('/findings?status=open'), api('/changes')
+      api('/status'), api('/proposals?status=proposed'), api('/findings?status=open'), api('/changes'),
+      api('/analytics/summary').catch(function () { return {}; })
     ]).then(function (res) {
-      renderCards(res[0]); renderProposals(res[1]); renderFindings(res[2]); renderChanges(res[3]);
+      renderCards(res[0]); renderProposals(res[1]); renderFindings(res[2]); renderChanges(res[3]); renderAnalytics(res[4]);
     }).catch(function (e) { if (e.message !== 'unauthorized') toast(e.message); });
   }
 
