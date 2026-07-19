@@ -4,8 +4,8 @@
  * surfaces can never diverge. Failures throw ApiError; transports translate.
  */
 
-import { runCrawl } from './crawl.js';
-import { runRules, type Triggered } from './rules.js';
+import { runCrawl, prunePageSnapshots } from './crawl.js';
+import { runRules, validateTitle, type Triggered } from './rules.js';
 import { aeoChecks } from './aeo.js';
 import { siteConfig } from './config.js';
 import { enqueueCandidates, draftWithTrace } from './propose.js';
@@ -39,23 +39,45 @@ export async function isRunning(env: Env): Promise<boolean> {
 }
 
 /**
+ * Atomically claim a run: insert a crawl_runs row ONLY when no un-finished
+ * recent run exists, in a single statement so two near-simultaneous starts can't
+ * both win (a check-then-act race would). Returns the new run id, or null when
+ * another run already holds the slot. The inserted row is what runCrawl fills in.
+ */
+export async function claimRun(env: Env): Promise<number | null> {
+  const now = new Date().toISOString();
+  const cutoff = new Date(Date.now() - IN_PROGRESS_WINDOW_MS).toISOString();
+  const res = await env.DB.prepare(
+    `INSERT INTO crawl_runs (started_at, pipeline_done)
+     SELECT ?1, 0
+     WHERE NOT EXISTS (SELECT 1 FROM crawl_runs WHERE pipeline_done = 0 AND started_at > ?2)`
+  )
+    .bind(now, cutoff)
+    .run();
+  if ((res.meta?.changes ?? 0) < 1) return null; // another start won the race
+  return res.meta.last_row_id;
+}
+
+/**
  * Start the pipeline in the background and return immediately. The caller's
  * `waitUntil` keeps the Worker alive until the run finishes; the dashboard/MCP
  * poll statusData() for `running=false` + a new lastRun. Refuses to start a
- * second concurrent run (the button double-click / cron overlap guard).
+ * second concurrent run (atomically, via claimRun — the button double-click /
+ * cron overlap guard).
  */
 export async function startRun(env: Env, waitUntil: (p: Promise<unknown>) => void): Promise<{ started: boolean; running: boolean }> {
-  if (await isRunning(env)) return { started: false, running: true };
+  const runId = await claimRun(env);
+  if (runId === null) return { started: false, running: true };
   waitUntil(
-    runPipeline(env)
+    runPipeline(env, runId)
       .then((r) => console.log(JSON.stringify({ evt: 'run_complete', ...r })))
       .catch((err) => console.error(JSON.stringify({ evt: 'run_error', error: err instanceof Error ? err.message : String(err) })))
   );
   return { started: true, running: true };
 }
 
-export async function runPipeline(env: Env) {
-  const { runId, snapshots } = await runCrawl(env);
+export async function runPipeline(env: Env, runId: number) {
+  const { snapshots } = await runCrawl(env, runId);
   try {
     // Sense modules share the findings lifecycle but are isolated — a failure
     // in any of them degrades to zero findings from that sense, never a
@@ -70,25 +92,38 @@ export async function runPipeline(env: Env) {
     };
     await sense('aeo', () => aeoChecks(env, snapshots));
     await sense('telemetry', () => telemetryFindings(env));
-    await sense('citations', () => citationFindings(env));
 
     // Weekly citation probes ride the daily pipeline: on the configured UTC
     // weekday, probe once (idempotent per day, so a manual /run can't
     // double-spend API calls). Isolated like the senses above.
+    //
+    // Ordering matters: on a probe day we sense citations AFTER the probe, once.
+    // Sensing before would evaluate stale rows — a still-open citation_lost from
+    // last week could open in the SAME run as the fresh citation_gained the probe
+    // produces (contradictory findings for the same query).
     let citations;
+    let citationsSensed = false;
     try {
       const { queries, engines, cronDay } = citationConfig(env);
       if (queries.length > 0 && engines.length > 0 && new Date().getUTCDay() === cronDay && !(await alreadyCheckedToday(env))) {
         citations = await runCitationProbes(env);
-        // Fold the fresh results into this run's findings immediately.
-        await sense('citations_post', () => citationFindings(env));
+        await sense('citations', () => citationFindings(env));
+        citationsSensed = true;
       }
     } catch (err) {
       console.error(JSON.stringify({ evt: 'citation_probe_error', error: err instanceof Error ? err.message : String(err) }));
     }
+    // Non-probe runs (and probe attempts that threw before sensing) fold the
+    // current citation state in exactly once.
+    if (!citationsSensed) await sense('citations', () => citationFindings(env));
 
     try {
       await pruneTelemetry(env);
+    } catch {
+      // retention pruning is best-effort
+    }
+    try {
+      await prunePageSnapshots(env);
     } catch {
       // retention pruning is best-effort
     }
@@ -135,6 +170,11 @@ function dedupeTriggered(list: Triggered[]): Triggered[] {
 }
 
 export async function statusData(env: Env) {
+  // aeo_hits / citations were added in a later version; on a database upgraded
+  // WITHOUT re-running db:init those tables don't exist and the sub-queries
+  // throw. Degrade each to an inactive/empty block so /status still returns 200
+  // (re-run `npm run db:init` — idempotent — to create them).
+  const emptyTelemetry = { active: false, lastHit: null, crawler7d: [] as { bot: string; n: number }[], referral7d: 0, md7d: 0 };
   const [lastRun, findings, proposals, changes, gscRows, running, telemetry, latestCitations] = await Promise.all([
     env.DB.prepare('SELECT id, started_at, finished_at, url_count, ok, pipeline_done FROM crawl_runs ORDER BY id DESC LIMIT 1').first(),
     env.DB.prepare("SELECT severity, COUNT(*) AS n FROM findings WHERE status = 'open' GROUP BY severity").all(),
@@ -142,10 +182,12 @@ export async function statusData(env: Env) {
     env.DB.prepare('SELECT COUNT(*) AS applied, SUM(CASE WHEN reverted_at IS NOT NULL THEN 1 ELSE 0 END) AS reverted FROM changes').first(),
     env.DB.prepare('SELECT COUNT(*) AS n, MAX(date) AS latest FROM gsc_daily').first(),
     isRunning(env),
-    telemetrySummary(env),
+    telemetrySummary(env).catch(() => emptyTelemetry),
     env.DB.prepare(
       'SELECT MAX(checked_at) AS last, COUNT(*) AS total, SUM(cited) AS cited FROM citations WHERE checked_at = (SELECT MAX(checked_at) FROM citations)'
-    ).first<{ last: string | null; total: number; cited: number | null }>(),
+    )
+      .first<{ last: string | null; total: number; cited: number | null }>()
+      .catch(() => null),
   ]);
   const citCfg = citationConfig(env);
   return {
@@ -192,7 +234,11 @@ export async function runCitationCheck(env: Env) {
 
 export async function listFindings(env: Env, status = 'open') {
   const rows = await env.DB.prepare(
-    'SELECT id, created_at, path, rule, severity, detail, status FROM findings WHERE status = ? ORDER BY severity, path LIMIT 500'
+    `SELECT id, created_at, path, rule, severity, detail, status FROM findings WHERE status = ?
+     ORDER BY CASE severity
+       WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 WHEN 'info' THEN 4 ELSE 5
+     END, path
+     LIMIT 500`
   )
     .bind(status)
     .all();
@@ -245,6 +291,10 @@ export async function createProposal(
   if (field === 'description') {
     const reason = validateDescription(args.value);
     if (reason) throw new ApiError(`invalid description: ${reason}`, 400);
+  } else {
+    // Title proposals previously bypassed all validation.
+    const reason = validateTitle(args.value);
+    if (reason) throw new ApiError(`invalid title: ${reason}`, 400);
   }
   const snap = await env.DB.prepare('SELECT title, description FROM page_snapshots WHERE path = ? ORDER BY id DESC LIMIT 1')
     .bind(args.path)
@@ -280,8 +330,8 @@ export async function listChanges(env: Env) {
 }
 
 export async function revertById(env: Env, changeId: number) {
-  const ok = await revertChange(env, changeId);
-  if (!ok) throw new ApiError('change not found or already reverted', 404);
+  const result = await revertChange(env, changeId);
+  if (!result.ok) throw new ApiError(result.error, result.status);
   return { ok: true };
 }
 

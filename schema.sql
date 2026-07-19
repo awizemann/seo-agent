@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS proposals (
   proposed_value TEXT NOT NULL,
   rationale TEXT,
   model TEXT,
-  status TEXT NOT NULL DEFAULT 'proposed',  -- proposed | approved | rejected
+  status TEXT NOT NULL DEFAULT 'proposed',  -- proposed | approved | rejected | reverted
   decided_at TEXT,
   applied_at TEXT
 );
@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS aeo_hits (
   referrer TEXT,
   path TEXT NOT NULL,
   status INTEGER,
-  served TEXT,                     -- 'html' | 'lane' (AI content lane) | 'md' (markdown twin) | 'file'
+  served TEXT,                     -- 'html' | 'md' (markdown twin) | 'file'; 'lane' (AI content lane) is written by a site-custom tap, not this repo's injector
   ua TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_aeo_hits_ts ON aeo_hits (ts);

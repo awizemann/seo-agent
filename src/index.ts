@@ -44,6 +44,15 @@ async function authorized(request: Request, env: Env): Promise<boolean> {
   return crypto.subtle.timingSafeEqual(a, b);
 }
 
+/** Parse a JSON request body, mapping malformed JSON to a 400 (not a 500). */
+async function parseJsonBody<T>(request: Request): Promise<T> {
+  try {
+    return (await request.json()) as T;
+  } catch {
+    throw new ApiError('invalid JSON body', 400);
+  }
+}
+
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
@@ -82,14 +91,14 @@ export default {
       // Manual proposal creation — e.g. promoting a dry-run winner. Goes
       // through the same validation, approval gate, and journal as AI drafts.
       if (method === 'POST' && pathname === '/proposals') {
-        const body = (await request.json()) as { path?: string; field?: string; value?: string; rationale?: string };
+        const body = await parseJsonBody<{ path?: string; field?: string; value?: string; rationale?: string }>(request);
         return json(await createProposal(env, body, invalidReason));
       }
 
       // Diagnostics: run the AI draft for one page and return raw output +
       // validation verdicts without persisting anything.
       if (method === 'POST' && pathname === '/proposals/dry-run') {
-        const body = (await request.json()) as { path?: string };
+        const body = await parseJsonBody<{ path?: string }>(request);
         return json(await dryRunDraft(env, body.path));
       }
 

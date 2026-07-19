@@ -27,6 +27,7 @@ import {
   runCitationCheck,
 } from './actions.js';
 import { invalidReason } from './propose.js';
+import { VERSION } from './version.js';
 
 const SUPPORTED_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 const LATEST_VERSION = '2025-06-18';
@@ -208,7 +209,7 @@ export async function handleMcp(request: Request, env: Env, ctx: ExecutionContex
         return rpcResult(id, {
           protocolVersion,
           capabilities: { tools: { listChanged: false } },
-          serverInfo: { name: 'seo-agent', version: '1.0.0' },
+          serverInfo: { name: 'seo-agent', version: VERSION },
         });
       }
       case 'ping':

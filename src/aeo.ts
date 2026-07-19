@@ -30,6 +30,7 @@
 import type { PageSnapshot } from './crawl.js';
 import type { Triggered } from './rules.js';
 import { siteConfig } from './config.js';
+import { VERSION } from './version.js';
 
 // Answer-engine and user-request fetchers: robots-blocking any of these costs
 // citations or classic search presence (Googlebot feeds AI Overviews/AI Mode;
@@ -167,6 +168,23 @@ export function visibleBodyText(html: string): string {
     .trim();
 }
 
+/** Day-of-year (UTC), 1–366. Drives deterministic sample rotation. Exported for tests. */
+export function dayOfYear(d: Date): number {
+  const start = Date.UTC(d.getUTCFullYear(), 0, 0);
+  const today = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  return Math.floor((today - start) / 86_400_000);
+}
+
+/** Pick up to `count` items from `pool` starting at a rotating offset (wraps around). Exported for tests. */
+export function pickSample<T>(pool: T[], count: number, offset: number): T[] {
+  if (pool.length === 0) return [];
+  const n = Math.min(count, pool.length);
+  const start = ((offset % pool.length) + pool.length) % pool.length;
+  const out: T[] = [];
+  for (let i = 0; i < n; i++) out.push(pool[(start + i) % pool.length]);
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // The checks
 // ---------------------------------------------------------------------------
@@ -191,7 +209,7 @@ async function fetchText(url: string, userAgent: string): Promise<Fetched> {
   }
 }
 
-const AGENT_UA = 'seo-agent/1.1 (aeo-audit; +https://github.com/awizemann/seo-agent)';
+const AGENT_UA = `seo-agent/${VERSION} (aeo-audit; +https://github.com/awizemann/seo-agent)`;
 
 export async function aeoChecks(env: Env, snapshots: PageSnapshot[]): Promise<Triggered[]> {
   const cfg = siteConfig(env);
@@ -243,10 +261,15 @@ export async function aeoChecks(env: Env, snapshots: PageSnapshot[]): Promise<Tr
   }
 
   // --- AI deliverability sampling ---
-  const candidates = snapshots.filter(
-    (s) => s.status === 200 && s.path !== '/' && (!cfg.articlePathPrefix || s.path.startsWith(cfg.articlePathPrefix))
-  );
-  const sample = candidates.slice(0, SAMPLE_PAGES);
+  // Prefer pages under ARTICLE_PATH_PREFIX, but fall back to ALL content pages
+  // when none match — an EXCLUSIVE prefix filter would sample zero pages. Rotate
+  // which pages we sample by day so coverage isn't stuck on the first three.
+  const contentPages = snapshots.filter((s) => s.status === 200 && s.path !== '/');
+  const preferred = cfg.articlePathPrefix
+    ? contentPages.filter((s) => s.path.startsWith(cfg.articlePathPrefix))
+    : contentPages;
+  const pool = preferred.length > 0 ? preferred : contentPages;
+  const sample = pickSample(pool, SAMPLE_PAGES, dayOfYear(new Date()));
   const fetched = await Promise.all(sample.map((s) => fetchText(`${origin}${s.path}`, cfg.aeoBotUa)));
   const botName = cfg.aeoBotUa.match(/compatible;\s*([\w-]+)/)?.[1] || 'the configured AI bot UA';
   for (let i = 0; i < sample.length; i++) {

@@ -10,6 +10,7 @@ const SCOPE = 'https://www.googleapis.com/auth/webmasters.readonly';
 const ROW_LIMIT = 5000;
 const LAG_DAYS = 2;
 const WINDOW_DAYS = 3;
+const FETCH_TIMEOUT_MS = 15_000;
 
 type ServiceAccount = { client_email: string; private_key: string };
 
@@ -48,6 +49,7 @@ async function accessToken(sa: ServiceAccount): Promise<string> {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: jwt }),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`google token exchange failed: ${res.status} ${await res.text()}`);
   return ((await res.json()) as { access_token: string }).access_token;
@@ -71,6 +73,7 @@ export async function ingestGsc(env: Env): Promise<{ skipped?: string; upserted?
       method: 'POST',
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
       body: JSON.stringify({ startDate, endDate, dimensions: ['date', 'page', 'query'], rowLimit: ROW_LIMIT, startRow }),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     if (!res.ok) throw new Error(`searchanalytics query failed: ${res.status} ${await res.text()}`);
     const batch = ((await res.json()) as { rows?: Row[] }).rows ?? [];

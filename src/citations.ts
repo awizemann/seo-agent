@@ -208,12 +208,22 @@ const ENGINES: EngineDef[] = [
 // The probe runner + findings
 // ---------------------------------------------------------------------------
 
+/**
+ * CITATION_CRON_DAY is a UTC weekday 0 (Sun) – 6 (Sat). Anything out of range or
+ * non-numeric — e.g. "7", which getUTCDay() never returns, silently disabling
+ * probes forever — falls back to Monday (1). Exported for tests.
+ */
+export function clampCronDay(raw: string | undefined): number {
+  const d = parseInt(raw ?? '', 10);
+  return Number.isInteger(d) && d >= 0 && d <= 6 ? d : 1;
+}
+
 export function citationConfig(env: Env): { queries: string[]; engines: string[]; cronDay: number } {
   const e = env as CitEnv;
   return {
     queries: parseQueries(e.CITATION_QUERIES ?? ''),
     engines: ENGINES.filter((x) => x.enabled(e)).map((x) => x.name),
-    cronDay: Number.isInteger(parseInt(e.CITATION_CRON_DAY ?? '', 10)) ? parseInt(e.CITATION_CRON_DAY!, 10) : 1,
+    cronDay: clampCronDay(e.CITATION_CRON_DAY),
   };
 }
 
@@ -294,39 +304,47 @@ const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
  *    auto-resolves after the following check).
  */
 export async function citationFindings(env: Env): Promise<Triggered[]> {
+  // Computed per (engine, query) in SQL — the latest two checks plus an
+  // EVER-cited flag — so a long history that would overflow a fixed global row
+  // window can't hide a key's earlier citation and mute citation_lost.
   const rows = (
     await env.DB.prepare(
-      'SELECT engine, query, cited, checked_at FROM citations WHERE error IS NULL ORDER BY checked_at DESC LIMIT 600'
-    ).all<{ engine: string; query: string; cited: number; checked_at: string }>()
+      `WITH ranked AS (
+         SELECT engine, query, cited, checked_at,
+                ROW_NUMBER() OVER (PARTITION BY engine, query ORDER BY checked_at DESC, id DESC) AS rn,
+                MAX(cited)   OVER (PARTITION BY engine, query) AS ever_cited
+         FROM citations
+         WHERE error IS NULL
+       )
+       SELECT engine, query,
+              MAX(CASE WHEN rn = 1 THEN cited END)      AS latest_cited,
+              MAX(CASE WHEN rn = 1 THEN checked_at END) AS latest_at,
+              MAX(CASE WHEN rn = 2 THEN cited END)      AS prev_cited,
+              MAX(ever_cited)                           AS ever_cited
+       FROM ranked
+       WHERE rn <= 2
+       GROUP BY engine, query`
+    ).all<{ engine: string; query: string; latest_cited: number; latest_at: string; prev_cited: number | null; ever_cited: number }>()
   ).results;
-  if (rows.length === 0) return [];
-
-  const byKey = new Map<string, { engine: string; query: string; states: { cited: number; at: string }[] }>();
-  for (const r of rows) {
-    const k = `${r.engine} ${r.query}`;
-    if (!byKey.has(k)) byKey.set(k, { engine: r.engine, query: r.query, states: [] });
-    byKey.get(k)!.states.push({ cited: r.cited, at: r.checked_at });
-  }
 
   const out: Triggered[] = [];
-  for (const { engine, query, states } of byKey.values()) {
-    const latest = states[0];
-    const prev = states[1];
-    const everBefore = states.slice(1).some((s) => s.cited === 1);
-    const path = `/citation/${engine}/${slug(query)}`;
-    if (latest.cited === 0 && everBefore) {
+  for (const r of rows) {
+    const path = `/citation/${r.engine}/${slug(r.query)}`;
+    // latest_cited === 0 ⇒ the latest row contributes no 1, so ever_cited === 1
+    // means a strictly-earlier check cited the site.
+    if (r.latest_cited === 0 && r.ever_cited === 1) {
       out.push({
         path,
         rule: 'citation_lost',
         severity: 'medium',
-        detail: `${engine} no longer cites the site for "${query}" (was cited in an earlier check; latest ${latest.at.slice(0, 10)})`,
+        detail: `${r.engine} no longer cites the site for "${r.query}" (was cited in an earlier check; latest ${r.latest_at.slice(0, 10)})`,
       });
-    } else if (latest.cited === 1 && prev && prev.cited === 0) {
+    } else if (r.latest_cited === 1 && r.prev_cited === 0) {
       out.push({
         path,
         rule: 'citation_gained',
         severity: 'info',
-        detail: `${engine} now cites the site for "${query}" (first seen ${latest.at.slice(0, 10)})`,
+        detail: `${r.engine} now cites the site for "${r.query}" (first seen ${r.latest_at.slice(0, 10)})`,
       });
     }
   }
