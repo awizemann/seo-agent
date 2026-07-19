@@ -28,6 +28,12 @@ export async function applyOverride(
 ): Promise<number> {
   if (!OVERRIDE_FIELDS.has(args.field)) throw new Error(`field not overridable: ${args.field}`);
   const current = await readOverride(env, args.path);
+  // Journal the TRUE prior state. The caller's oldValue is the proposal's
+  // current_value, captured from a snapshot at proposal-creation — when an
+  // override field is already live in KV (two approvals for the same
+  // (path, field) between crawls), that live value is what a revert must
+  // restore, not the snapshot-era origin value.
+  const oldValue = current[args.field] !== undefined ? current[args.field] : args.oldValue;
   current[args.field] = args.value;
   await env.OVERRIDES.put(overrideKey(args.path), JSON.stringify(current));
 
@@ -35,7 +41,7 @@ export async function applyOverride(
   const row = await env.DB.prepare(
     'INSERT INTO changes (applied_at, path, field, old_value, new_value, source, proposal_id) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id'
   )
-    .bind(now, args.path, args.field, args.oldValue, args.value, args.source, args.proposalId ?? null)
+    .bind(now, args.path, args.field, oldValue, args.value, args.source, args.proposalId ?? null)
     .first<{ id: number }>();
   console.log(JSON.stringify({ evt: 'override_applied', path: args.path, field: args.field, source: args.source }));
   return row?.id ?? 0;

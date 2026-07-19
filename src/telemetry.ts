@@ -55,8 +55,11 @@ export async function listCrawlerHits(env: Env, days = 7, limit = 200) {
  *  - ai_crawlers_silent (info): the tap has been active ≥14 days but NO AI
  *    crawler hit arrived in the last 14 — the site is invisible to AI engines
  *    or something started blocking them.
- *  - ai_crawler_errors (medium): a bot with ≥5 hits in 7 days is getting >20%
- *    4xx/5xx — something is broken specifically for that crawler.
+ *  - ai_crawler_errors (medium): a bot with ≥5 CONTENT responses (served
+ *    html/lane/md) in 7 days is getting >20% 4xx/5xx on them — something is
+ *    broken specifically for that crawler. Asset serves (served='file': static
+ *    files, asset 404s, redirects) are excluded from both sides of the ratio;
+ *    bots probing for missing favicons/icons must not open findings.
  */
 export async function telemetryFindings(env: Env): Promise<Triggered[]> {
   const out: Triggered[] = [];
@@ -78,8 +81,11 @@ export async function telemetryFindings(env: Env): Promise<Triggered[]> {
     }
   }
 
+  // Content serves only (both numerator and denominator): the site tap also
+  // records asset serves/404s/redirects as served='file', and a bot probing
+  // missing static assets (apple-touch-icon.png…) must not read as "errors".
   const errRows = await env.DB.prepare(
-    "SELECT bot, COUNT(*) AS n, SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS errs FROM aeo_hits WHERE kind = 'crawler' AND ts >= ? GROUP BY bot HAVING n >= 5"
+    "SELECT bot, COUNT(*) AS n, SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS errs FROM aeo_hits WHERE kind = 'crawler' AND ts >= ? AND served IN ('html', 'lane', 'md') GROUP BY bot HAVING n >= 5"
   )
     .bind(isoDaysAgo(7))
     .all<{ bot: string; n: number; errs: number }>();
@@ -89,7 +95,7 @@ export async function telemetryFindings(env: Env): Promise<Triggered[]> {
         path: `/telemetry/${r.bot}`,
         rule: 'ai_crawler_errors',
         severity: 'medium',
-        detail: `${r.bot}: ${r.errs}/${r.n} requests errored (4xx/5xx) in the last 7 days`,
+        detail: `${r.bot}: ${r.errs}/${r.n} content requests errored (4xx/5xx) in the last 7 days`,
       });
     }
   }
