@@ -72,7 +72,8 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   button.ok { background: var(--ok); border-color: var(--ok); color: #fff; }
   button.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); }
   button.small { padding: 5px 10px; font-size: 12px; }
-  .chip { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--chip); color: var(--muted); }
+  .chip { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--chip); color: var(--muted); white-space: nowrap; }
+  .nw { white-space: nowrap; }
   .chip.high { color: var(--bad); } .chip.medium { color: var(--warn); } .chip.info { color: var(--accent); }
   details > summary { cursor: pointer; font-size: 14px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
   table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
@@ -335,8 +336,8 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   function remedCell(f) {
     var r = f.remediation;
     if (!r) return '';
-    if (r.state === 'proposal_pending') return '<a href="#proposals">proposal pending</a>';
-    if (r.state === 'applied_awaiting_recrawl') return '<span class="chip applied">fix applied — confirming next crawl</span>';
+    if (r.state === 'proposal_pending') return '<a href="#proposals" class="nw">proposal pending</a>';
+    if (r.state === 'applied_awaiting_recrawl') return '<span class="chip applied" title="Fix applied — confirming on the next crawl">applied</span>';
     return '';
   }
   function renderFindings(open, dismissed) {
