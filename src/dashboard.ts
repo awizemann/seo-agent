@@ -469,7 +469,9 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
 
   // --- Analytics section: client-side inline-SVG charts over /analytics/summary.
   // Kept dependency-free and template-literal-free like the rest of this script.
-  function dnum(x) { return String(Math.round(x == null ? 0 : x)).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+  // Doubled backslashes: this whole script is emitted from a TS template
+  // literal, which consumes one level of escaping — singles would strip.
+  function dnum(x) { return String(Math.round(x == null ? 0 : x)).replace(/\\B(?=(\\d{3})+(?!\\d))/g, ','); }
   function dayDiff(a, b) { return Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 86400000); }
   function panel(title, inner) { return '<div class="panel"><h3>' + esc(title) + '</h3>' + inner + '</div>'; }
 
