@@ -11,8 +11,9 @@ import { siteConfig } from './config.js';
 import { enqueueCandidates, draftWithTrace } from './propose.js';
 import { ingestGsc } from './gsc.js';
 import { applyOverride, revertChange } from './overrides.js';
-import { telemetrySummary, telemetryFindings, pruneTelemetry, listCrawlerHits as telemetryHits } from './telemetry.js';
+import { telemetrySummary, telemetryFindings, pruneTelemetry, rollupTelemetryWeekly, listCrawlerHits as telemetryHits } from './telemetry.js';
 import { runCitationProbes, citationFindings, citationConfig, alreadyCheckedToday } from './citations.js';
+import { impactFindings } from './impact.js';
 
 export class ApiError extends Error {
   constructor(
@@ -92,6 +93,10 @@ export async function runPipeline(env: Env, runId: number) {
     };
     await sense('aeo', () => aeoChecks(env, snapshots));
     await sense('telemetry', () => telemetryFindings(env));
+    // Change-impact sense: computes any newly-computable d14/d28 verdicts from
+    // GSC history (uses the previous run's ingest — GSC lags days regardless)
+    // and surfaces hurt/helped changes. No-ops on GSC-off instances.
+    await sense('impact', () => impactFindings(env));
 
     // Weekly citation probes ride the daily pipeline: on the configured UTC
     // weekday, probe once (idempotent per day, so a manual /run can't
@@ -117,6 +122,13 @@ export async function runPipeline(env: Env, runId: number) {
     // current citation state in exactly once.
     if (!citationsSensed) await sense('citations', () => citationFindings(env));
 
+    try {
+      // Roll up completed weeks BEFORE the prune so a week aging past 90 days is
+      // captured into permanent history first.
+      await rollupTelemetryWeekly(env);
+    } catch {
+      // weekly rollup is best-effort
+    }
     try {
       await pruneTelemetry(env);
     } catch {

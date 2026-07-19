@@ -28,6 +28,7 @@ import {
   runCitationCheck,
 } from './actions.js';
 import { invalidReason, draftAndCreate, type DraftJob } from './propose.js';
+import { analyticsSummary, analyticsPage, analyticsImpact } from './analytics.js';
 import { handleMcp } from './mcp.js';
 import { DASHBOARD_HTML } from './dashboard.js';
 
@@ -123,6 +124,13 @@ export default {
       }
       if (method === 'GET' && pathname === '/aeo/citations') return json(await listCitations(env));
       if (method === 'POST' && pathname === '/aeo/citations/run') return json(await runCitationCheck(env));
+
+      // Analytics: SEO/AEO metrics over time, change-impact verdicts. Read-only,
+      // assembled in analytics.ts; each block degrades to empty on a DB that
+      // predates the change_impact / aeo_weekly tables (never 500s).
+      if (method === 'GET' && pathname === '/analytics/summary') return json(await analyticsSummary(env));
+      if (method === 'GET' && pathname === '/analytics/page') return json(await analyticsPage(env, url.searchParams.get('path') || ''));
+      if (method === 'GET' && pathname === '/analytics/impact') return json(await analyticsImpact(env));
 
       return json({ error: 'not found' }, 404);
     } catch (err) {

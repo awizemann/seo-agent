@@ -56,8 +56,84 @@ async function accessToken(sa: ServiceAccount): Promise<string> {
 }
 
 const isoDaysAgo = (days: number): string => new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+const addDays = (date: string, n: number): string => {
+  const d = new Date(date + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
 
-export async function ingestGsc(env: Env): Promise<{ skipped?: string; upserted?: number; window?: string }> {
+// One-shot history backfill: when gsc_daily holds fewer than this many distinct
+// dates the sense fetches ~90 days once (chunked, capped) so the analytics
+// layer has a real baseline. Once history exists the trigger is false forever.
+const BACKFILL_MIN_DATES = 30;
+const BACKFILL_DAYS = 90;
+const BACKFILL_CHUNK_DAYS = 30;
+const MAX_BACKFILL_CALLS = 40; // safety cap on paged API requests
+
+type Row = { keys: [string, string, string]; clicks: number; impressions: number; ctr: number; position: number };
+
+/** Page through one date range, returning every row and the API call count. */
+async function fetchRange(
+  token: string,
+  endpoint: string,
+  startDate: string,
+  endDate: string
+): Promise<{ rows: Row[]; calls: number }> {
+  const rows: Row[] = [];
+  let calls = 0;
+  for (let startRow = 0; ; startRow += ROW_LIMIT) {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ startDate, endDate, dimensions: ['date', 'page', 'query'], rowLimit: ROW_LIMIT, startRow }),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    calls++;
+    if (!res.ok) throw new Error(`searchanalytics query failed: ${res.status} ${await res.text()}`);
+    const batch = ((await res.json()) as { rows?: Row[] }).rows ?? [];
+    rows.push(...batch);
+    if (batch.length < ROW_LIMIT) break;
+  }
+  return { rows, calls };
+}
+
+async function upsertRows(env: Env, rows: Row[]): Promise<void> {
+  if (rows.length === 0) return;
+  const upsert = env.DB.prepare(
+    `INSERT OR REPLACE INTO gsc_daily (date, page, query, clicks, impressions, ctr, position) VALUES (?, ?, ?, ?, ?, ?, ?)`
+  );
+  // D1 batches are capped well above this chunk size; chunk to stay safe.
+  for (let i = 0; i < rows.length; i += 500) {
+    await env.DB.batch(
+      rows.slice(i, i + 500).map((r) => upsert.bind(r.keys[0], r.keys[1], r.keys[2], r.clicks, r.impressions, r.ctr, r.position))
+    );
+  }
+}
+
+/** Fetch ~90 days of history in date-chunked, paged requests (capped). Idempotent. */
+async function backfillGsc(env: Env, token: string, endpoint: string): Promise<{ range: string; rows: number; calls: number }> {
+  const overallStart = isoDaysAgo(LAG_DAYS + BACKFILL_DAYS - 1);
+  const overallEnd = isoDaysAgo(LAG_DAYS);
+  let totalRows = 0;
+  let calls = 0;
+  for (let chunkStart = overallStart; chunkStart <= overallEnd; ) {
+    const proposedEnd = addDays(chunkStart, BACKFILL_CHUNK_DAYS - 1);
+    const chunkEnd = proposedEnd < overallEnd ? proposedEnd : overallEnd;
+    const { rows, calls: c } = await fetchRange(token, endpoint, chunkStart, chunkEnd);
+    calls += c;
+    await upsertRows(env, rows);
+    totalRows += rows.length;
+    if (calls >= MAX_BACKFILL_CALLS) break; // safety cap — pick up the rest next run
+    chunkStart = addDays(chunkEnd, 1);
+  }
+  const range = `${overallStart}..${overallEnd}`;
+  console.log(JSON.stringify({ evt: 'gsc_backfill_complete', range, rows: totalRows, calls }));
+  return { range, rows: totalRows, calls };
+}
+
+export async function ingestGsc(
+  env: Env
+): Promise<{ skipped?: string; upserted?: number; window?: string; backfill?: { range: string; rows: number; calls: number } }> {
   if (!env.GSC_SERVICE_ACCOUNT_JSON) return { skipped: 'GSC_SERVICE_ACCOUNT_JSON not configured' };
 
   const sa = JSON.parse(env.GSC_SERVICE_ACCOUNT_JSON) as ServiceAccount;
@@ -66,33 +142,17 @@ export async function ingestGsc(env: Env): Promise<{ skipped?: string; upserted?
   const endDate = isoDaysAgo(LAG_DAYS);
   const endpoint = `https://searchconsole.googleapis.com/webmasters/v3/sites/${encodeURIComponent(env.GSC_PROPERTY)}/searchAnalytics/query`;
 
-  type Row = { keys: [string, string, string]; clicks: number; impressions: number; ctr: number; position: number };
-  const rows: Row[] = [];
-  for (let startRow = 0; ; startRow += ROW_LIMIT) {
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ startDate, endDate, dimensions: ['date', 'page', 'query'], rowLimit: ROW_LIMIT, startRow }),
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
-    if (!res.ok) throw new Error(`searchanalytics query failed: ${res.status} ${await res.text()}`);
-    const batch = ((await res.json()) as { rows?: Row[] }).rows ?? [];
-    rows.push(...batch);
-    if (batch.length < ROW_LIMIT) break;
-  }
-
-  if (rows.length > 0) {
-    const upsert = env.DB.prepare(
-      `INSERT OR REPLACE INTO gsc_daily (date, page, query, clicks, impressions, ctr, position) VALUES (?, ?, ?, ?, ?, ?, ?)`
-    );
-    // D1 batches are capped well above this chunk size; chunk to stay safe.
-    for (let i = 0; i < rows.length; i += 500) {
-      await env.DB.batch(
-        rows.slice(i, i + 500).map((r) => upsert.bind(r.keys[0], r.keys[1], r.keys[2], r.clicks, r.impressions, r.ctr, r.position))
-      );
-    }
-  }
-
+  const { rows } = await fetchRange(token, endpoint, startDate, endDate);
+  await upsertRows(env, rows);
   console.log(JSON.stringify({ evt: 'gsc_ingest_complete', window: `${startDate}..${endDate}`, rows: rows.length }));
-  return { upserted: rows.length, window: `${startDate}..${endDate}` };
+
+  // Thin history → one-shot 90-day backfill (INSERT OR REPLACE, so overlap with
+  // the trailing window above is harmless).
+  let backfill: { range: string; rows: number; calls: number } | undefined;
+  const distinct = await env.DB.prepare('SELECT COUNT(DISTINCT date) AS n FROM gsc_daily').first<{ n: number }>();
+  if ((distinct?.n ?? 0) < BACKFILL_MIN_DATES) {
+    backfill = await backfillGsc(env, token, endpoint);
+  }
+
+  return { upserted: rows.length, window: `${startDate}..${endDate}`, ...(backfill ? { backfill } : {}) };
 }

@@ -27,6 +27,8 @@ import {
   runCitationCheck,
 } from './actions.js';
 import { invalidReason } from './propose.js';
+import { analyticsSummary, analyticsImpact } from './analytics.js';
+import { VERDICT_METHODOLOGY } from './impact.js';
 import { VERSION } from './version.js';
 
 const SUPPORTED_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
@@ -152,6 +154,27 @@ const TOOLS: Tool[] = [
       'Probe the configured AI engines (Gemini free-tier by default; Perplexity/OpenAI/Anthropic when their keys are set) with every CITATION_QUERIES query right now and record who cites the site. Returns {checked, cited, errors, engines} — or a `skipped` reason when queries/keys are not configured. Costs API quota on each call.',
     inputSchema: { type: 'object', properties: {} },
     handler: (env) => runCitationCheck(env),
+  },
+  {
+    name: 'get_analytics',
+    description:
+      'SEO/AEO metrics over time for the dashboard Analytics view: GSC clicks/impressions/CTR/position daily for 90d (all pages summed, active=false when GSC is off), AI-traffic daily counts (30d) + permanent weekly rollups + top AI bots (7d), citation-probe history, an open-findings-by-severity daily series (90d), and every applied change with its latest helped/hurt/neutral/insufficient_data verdict.',
+    inputSchema: { type: 'object', properties: {} },
+    handler: (env) => analyticsSummary(env),
+  },
+  {
+    name: 'get_change_impact',
+    description:
+      'Per-change SEO impact rows (d14/d28 before/after GSC comparison with a helped/hurt/neutral/insufficient_data verdict), optionally for one change_id. Returns the rows plus the verdict methodology — this is CORRELATION, not causation, and insufficient_data is expected for low-traffic or recently-applied changes.',
+    inputSchema: {
+      type: 'object',
+      properties: { change_id: { type: 'number', description: 'Optional — limit to one change from list_changes' } },
+    },
+    handler: async (env, a) => {
+      const rows = (await analyticsImpact(env)) as { change_id: number }[];
+      const filtered = a.change_id != null ? rows.filter((r) => r.change_id === Number(a.change_id)) : rows;
+      return { rows: filtered, methodology: VERDICT_METHODOLOGY };
+    },
   },
 ];
 

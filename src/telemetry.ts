@@ -105,3 +105,57 @@ export async function telemetryFindings(env: Env): Promise<Triggered[]> {
 export async function pruneTelemetry(env: Env): Promise<void> {
   await env.DB.prepare('DELETE FROM aeo_hits WHERE ts < ?').bind(isoDaysAgo(RETENTION_DAYS)).run();
 }
+
+/**
+ * ISO-week Monday (UTC) for a timestamp, as YYYY-MM-DD. Weeks start Monday, so
+ * Sunday belongs to the week that began 6 days earlier. Pure; unit-tested.
+ */
+export function weekStartOf(isoTs: string): string {
+  const d = new Date(isoTs);
+  const day = d.getUTCDay(); // 0=Sun .. 6=Sat
+  const deltaToMonday = day === 0 ? -6 : 1 - day;
+  const monday = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + deltaToMonday));
+  return monday.toISOString().slice(0, 10);
+}
+
+/**
+ * Aggregate aeo_hits into permanent weekly rollups. Runs each pipeline run
+ * (before the 90-day prune, so a week about to age out is captured first). Only
+ * COMPLETED ISO weeks (week_start strictly before the current week) are rolled
+ * up; the in-progress week is left until it closes. INSERT OR REPLACE keeps it
+ * idempotent — re-rolling a still-present completed week just refreshes the same
+ * numbers, and a week whose hits have since been pruned simply isn't re-touched,
+ * so its rollup survives. bot/served coalesce to '' (never NULL) so the UNIQUE
+ * key actually dedupes (SQLite treats NULLs as distinct).
+ */
+export async function rollupTelemetryWeekly(env: Env): Promise<void> {
+  const rows = (
+    await env.DB.prepare('SELECT ts, kind, bot, served FROM aeo_hits').all<{
+      ts: string;
+      kind: string;
+      bot: string | null;
+      served: string | null;
+    }>()
+  ).results;
+  if (rows.length === 0) return;
+
+  const thisWeek = weekStartOf(new Date().toISOString());
+  const agg = new Map<string, { week_start: string; kind: string; bot: string; served: string; hits: number }>();
+  for (const r of rows) {
+    const week = weekStartOf(r.ts);
+    if (week >= thisWeek) continue; // skip the in-progress (or any future-dated) week
+    const bot = r.bot ?? '';
+    const served = r.served ?? '';
+    const key = `${week}|${r.kind}|${bot}|${served}`;
+    const cur = agg.get(key);
+    if (cur) cur.hits++;
+    else agg.set(key, { week_start: week, kind: r.kind, bot, served, hits: 1 });
+  }
+  if (agg.size === 0) return;
+
+  const upsert = env.DB.prepare('INSERT OR REPLACE INTO aeo_weekly (week_start, kind, bot, served, hits) VALUES (?, ?, ?, ?, ?)');
+  const statements = [...agg.values()].map((a) => upsert.bind(a.week_start, a.kind, a.bot, a.served, a.hits));
+  for (let i = 0; i < statements.length; i += 500) {
+    await env.DB.batch(statements.slice(i, i + 500));
+  }
+}

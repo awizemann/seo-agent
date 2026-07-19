@@ -103,6 +103,45 @@ CREATE TABLE IF NOT EXISTS aeo_hits (
 CREATE INDEX IF NOT EXISTS idx_aeo_hits_ts ON aeo_hits (ts);
 CREATE INDEX IF NOT EXISTS idx_aeo_hits_bot ON aeo_hits (bot, ts);
 
+-- Per-change SEO impact (analytics). One row per (change, phase): the d14/d28
+-- before/after GSC comparison for the changed page, plus a helped/hurt verdict.
+-- before_*/after_clicks and before_*/after_impressions are stored as PER-DAY
+-- rates (total ÷ days-with-data) so unequal effective windows still compare;
+-- ctr/position are impression-weighted. Populated by the impact sense once a
+-- change is old enough for GSC to have covered its after-window.
+CREATE TABLE IF NOT EXISTS change_impact (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  change_id INTEGER NOT NULL,
+  phase TEXT NOT NULL CHECK (phase IN ('d14', 'd28')),
+  computed_at TEXT NOT NULL,
+  before_clicks REAL,
+  after_clicks REAL,
+  before_impressions REAL,
+  after_impressions REAL,
+  before_ctr REAL,
+  after_ctr REAL,
+  before_position REAL,
+  after_position REAL,
+  verdict TEXT NOT NULL,            -- helped | hurt | neutral | insufficient_data
+  UNIQUE (change_id, phase)
+);
+CREATE INDEX IF NOT EXISTS idx_change_impact_change ON change_impact (change_id);
+
+-- Weekly rollups of AI-traffic telemetry. aeo_hits is pruned at 90 days; these
+-- completed-ISO-week aggregates (Mon-start, UTC) survive the prune, giving
+-- permanent AI-traffic history. One row per (week_start, kind, bot, served);
+-- bot/served are coalesced to '' (never NULL) so INSERT OR REPLACE stays
+-- idempotent — SQLite treats NULLs as distinct in a UNIQUE index.
+CREATE TABLE IF NOT EXISTS aeo_weekly (
+  week_start TEXT NOT NULL,          -- ISO Monday, YYYY-MM-DD, UTC
+  kind TEXT NOT NULL,
+  bot TEXT,
+  served TEXT NOT NULL,
+  hits INTEGER NOT NULL,
+  UNIQUE (week_start, kind, bot, served)
+);
+CREATE INDEX IF NOT EXISTS idx_aeo_weekly_week ON aeo_weekly (week_start);
+
 -- Citation probes — periodic checks of whether AI answer engines cite the
 -- site for configured queries (CITATION_QUERIES). One row per engine × query
 -- per probe batch (checked_at identifies the batch).
