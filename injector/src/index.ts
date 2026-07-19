@@ -87,7 +87,9 @@ function inject(res: Response, o: Override): Response {
   let rw = new HTMLRewriter();
   if (o.title) {
     rw = rw
-      .on('title', { element: (el) => { el.setInnerContent(o.title!); } })
+      // `head > title` so a title override can't overwrite an inline-SVG
+      // <title> (the accessible name) in the body — bare `title` matches both.
+      .on('head > title', { element: (el) => { el.setInnerContent(o.title!); } })
       .on('meta[property="og:title"]', setContent(o.title))
       .on('meta[name="twitter:title"]', setContent(o.title));
   }
