@@ -469,17 +469,35 @@ endpoints degrade to empty rather than error.
 A self-contained human UI is served by the Worker itself at **`GET /`** (and
 `/dashboard`) — zero dependencies, zero build step, theme-aware, mobile-friendly.
 The page is public (it holds no secrets); you paste the `AGENT_TOKEN` once and it
-is kept in `localStorage` and sent as the bearer on every API call. From it you
-can: see status cards (pending / open findings / applied / GSC freshness), review
-pending proposals with a strikethrough-current-vs-proposed diff and approve or
-reject each, trigger a pipeline run, draft a description on demand (dry run) and
-promote it to a proposal, browse open findings, and revert any applied change
-from the journal. An **Analytics** section renders hand-rolled inline-SVG charts
-over `/analytics/summary` — GSC clicks/impressions lines with a tick at each
-change, stacked AI-traffic bars with a top-bots list, a citations grid, an
-open-findings-over-time area, and a changes table with a helped/hurt verdict chip
-per change (GSC panel hidden where GSC is off). It's the fastest way to clear the
-daily batch — open the URL, review, tap approve.
+is kept in `localStorage` and sent as the bearer on every API call.
+
+It's organized as five tabs, each deep-linkable by URL hash — back/forward and
+bookmarks work, and an unknown/missing hash resolves to Overview (through a fixed
+whitelist, never string-interpolated):
+
+- **Overview** (`#overview`) — status cards (pending / open findings / applied /
+  GSC freshness / AI crawls / AI referrals / cited) and the last-run line. Every
+  card is a link that routes into the tab that drills into it.
+- **Findings** (`#findings`) — the open-findings table (severity / rule / path /
+  detail). The tab label carries a live open-count badge.
+- **Proposals** (`#proposals`) — pending proposals with a strikethrough
+  current-vs-proposed diff and per-item approve / reject, plus the on-demand
+  dry-run drafter (draft a description, then promote it to a proposal). The tab
+  label carries a live pending-count badge.
+- **Changes** (`#changes`) — one table of every applied change merged with its
+  impact: the helped / hurt / neutral verdict chip and the revert control sit
+  together, newest first.
+- **Analytics** (`#analytics`) — hand-rolled inline-SVG charts over
+  `/analytics/summary`: GSC clicks/impressions lines with a tick at each change,
+  stacked AI-traffic bars with a top-bots list, a citations grid, and an
+  open-findings-over-time area (the GSC panel is hidden where GSC is off).
+
+Approve / reject / revert update the tab badges without a full reload. The
+`/analytics/summary` payload (the heaviest read) is fetched lazily the first time
+Changes or Analytics is opened and cached for the session, so the initial load
+stays light and switching tabs never refetches. Trigger a pipeline run from the
+header at any time. It's the fastest way to clear the daily batch — open the URL,
+review, tap approve.
 
 ## MCP control surface
 

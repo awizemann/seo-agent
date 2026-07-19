@@ -7,6 +7,17 @@
  * it is kept in localStorage and sent as `Authorization: Bearer …` on every API
  * call, which is where the real auth lives. Same token as the REST/MCP surface.
  *
+ * Layout is a five-tab UI — Overview / Findings / Proposals / Changes /
+ * Analytics — driven entirely by the URL hash (#overview … #analytics), so tabs
+ * are deep-linkable and back/forward works. The hash is resolved through a fixed
+ * whitelist map only (never interpolated into HTML or a selector). The Overview
+ * stat cards are real <a href="#…"> links that route into the matching tab.
+ *
+ * Perf: the heavy /analytics/summary payload is deferred — fetched only when the
+ * Analytics or Changes tab is first opened, then cached for the session (and
+ * invalidated after a mutating action). The core four (/status /proposals
+ * /findings /changes) load up front; switching tabs never refetches them.
+ *
  * The embedded client script deliberately avoids template literals and `${…}`
  * so this outer TS template literal needs no escaping.
  */
@@ -87,6 +98,25 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   .chip.helped { color: var(--ok); } .chip.hurt { color: var(--bad); } .chip.neutral { color: var(--muted); }
   .chip.insufficient_data, .chip.pending { color: var(--muted); background: transparent; border: 1px solid var(--line); }
   .chip.insufficient_data { border-style: dashed; }
+  /* Tab bar — anchor links driven by the URL hash; scrolls horizontally when narrow. */
+  .tabs { display: flex; gap: 2px; margin: 18px 0 0; border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: thin; }
+  .tab { flex: 0 0 auto; text-decoration: none; color: var(--muted); font-size: 13px; font-weight: 550;
+    padding: 9px 13px; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap;
+    display: inline-flex; align-items: center; gap: 6px; border-radius: 8px 8px 0 0; }
+  .tab:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 4%, transparent); }
+  .tab.active { color: var(--ink); border-bottom-color: var(--accent); }
+  .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+  .badge { display: inline-flex; align-items: center; justify-content: center; min-width: 17px; height: 17px;
+    font-size: 11px; font-weight: 650; padding: 0 5px; border-radius: 999px; background: var(--accent); color: #fff; }
+  .badge[hidden] { display: none; }
+  .panel-tab { margin-top: 16px; }
+  .panel-tab[hidden] { display: none; }
+  .tablewrap { width: 100%; overflow-x: auto; }
+  /* Stat cards double as deep links into their tab. */
+  a.card { text-decoration: none; color: inherit; display: block; transition: border-color .12s; }
+  a.card:hover { border-color: var(--muted); }
+  a.card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  a.card .n { color: var(--ink); }
 </style>
 </head>
 <body>
@@ -108,22 +138,27 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
     <button id="runbtn" class="small" data-act="run">Run pipeline</button>
     <button class="small" data-act="logout">Sign out</button>
   </header>
-  <div id="lastrun" class="muted" style="font-size:12px"></div>
 
-  <div class="cards" id="cards"></div>
+  <nav class="tabs" id="tabs" aria-label="Dashboard sections">
+    <a class="tab" id="tab-overview" href="#overview">Overview</a>
+    <a class="tab" id="tab-findings" href="#findings">Findings <span class="badge" id="badge-findings" hidden></span></a>
+    <a class="tab" id="tab-proposals" href="#proposals">Proposals <span class="badge" id="badge-proposals" hidden></span></a>
+    <a class="tab" id="tab-changes" href="#changes">Changes</a>
+    <a class="tab" id="tab-analytics" href="#analytics">Analytics</a>
+  </nav>
 
-  <section id="analyticsSection">
-    <h2>Analytics</h2>
-    <div id="analytics"></div>
+  <section class="panel-tab" id="panel-overview" aria-label="Overview">
+    <div id="lastrun" class="muted" style="font-size:12px;margin-top:14px"></div>
+    <div class="cards" id="cards"></div>
   </section>
 
-  <section>
-    <h2>Pending proposals</h2>
+  <section class="panel-tab" id="panel-findings" aria-label="Findings" hidden>
+    <div id="findings"></div>
+  </section>
+
+  <section class="panel-tab" id="panel-proposals" aria-label="Proposals" hidden>
     <div id="proposals"></div>
-  </section>
-
-  <section>
-    <details>
+    <details style="margin-top:16px">
       <summary>Draft a description (dry run)</summary>
       <div class="item" style="margin-top:10px">
         <div class="row">
@@ -135,18 +170,12 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
     </details>
   </section>
 
-  <section>
-    <details>
-      <summary id="findsum">Open findings</summary>
-      <div id="findings"></div>
-    </details>
+  <section class="panel-tab" id="panel-changes" aria-label="Changes" hidden>
+    <div id="changes"></div>
   </section>
 
-  <section>
-    <details>
-      <summary id="chgsum">Applied changes</summary>
-      <div id="changes"></div>
-    </details>
+  <section class="panel-tab" id="panel-analytics" aria-label="Analytics" hidden>
+    <div id="analytics"></div>
   </section>
 </div>
 
@@ -156,6 +185,13 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
 (function () {
   var KEY = 'seo_agent_token';
   var token = localStorage.getItem(KEY) || '';
+
+  // In-memory model of the core payloads, so tab switches and post-action badge
+  // updates never have to refetch. analyticsData is the deferred /analytics
+  // payload, cached for the session (nulled after a mutation that invalidates it).
+  var state = { status: null, proposals: [], findings: [], changes: [] };
+  var analyticsData = null;
+  var analyticsPending = false;
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -191,11 +227,56 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
     localStorage.setItem(KEY, token);
     el('login').style.display = 'none';
     el('app').style.display = '';
-    load();
+    boot();
   }
-  function logout() { localStorage.removeItem(KEY); token = ''; showLogin(''); }
+  function logout() { localStorage.removeItem(KEY); token = ''; analyticsData = null; showLogin(''); }
 
   function num(x) { return x == null ? '0' : String(x); }
+
+  // --- Tab machinery -------------------------------------------------------
+  // The URL hash is the single source of truth for which tab is shown. It is
+  // resolved ONLY through this fixed whitelist — never interpolated into HTML
+  // or a selector — so a crafted #… can't inject anything. Unknown/missing
+  // hash falls back to overview.
+  var TAB_KEYS = { overview: 1, findings: 1, proposals: 1, changes: 1, analytics: 1 };
+  var TAB_ORDER = ['overview', 'findings', 'proposals', 'changes', 'analytics'];
+  var currentTab = 'overview';
+
+  function resolveHash() {
+    var raw = (location.hash || '').replace(/^#/, '');
+    // hasOwnProperty, not TAB_KEYS[raw], so inherited keys (#__proto__,
+    // #constructor, …) can't slip through the whitelist as truthy.
+    return Object.prototype.hasOwnProperty.call(TAB_KEYS, raw) ? raw : 'overview';
+  }
+  function activateTab(key) {
+    currentTab = key;
+    TAB_ORDER.forEach(function (k) {
+      var active = k === key;
+      var panel = el('panel-' + k), tab = el('tab-' + k);
+      if (panel) panel.hidden = !active;
+      if (tab) {
+        tab.classList.toggle('active', active);
+        if (active) tab.setAttribute('aria-current', 'page');
+        else tab.removeAttribute('aria-current');
+      }
+    });
+    // Analytics and Changes both consume the deferred /analytics payload
+    // (charts, and the per-change verdict chip respectively); load it on first
+    // need and cache it.
+    if (key === 'analytics' || key === 'changes') ensureAnalytics();
+  }
+  function onHashChange() { activateTab(resolveHash()); }
+
+  function setBadge(id, n) {
+    var b = el(id);
+    if (!b) return;
+    if (n > 0) { b.textContent = String(n); b.hidden = false; }
+    else { b.textContent = ''; b.hidden = true; }
+  }
+  function updateBadges() {
+    setBadge('badge-findings', (state.findings || []).length);
+    setBadge('badge-proposals', (state.proposals || []).length);
+  }
 
   function renderCards(s) {
     var open = 0;
@@ -206,15 +287,19 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
     var aeo = s.aeo || {}, tel = aeo.telemetry || {}, cit = aeo.citations || {};
     var crawls = 0;
     (tel.crawler7d || []).forEach(function (r) { crawls += r.n; });
+    // [label, value, target-tab hash] — every card deep-links into its tab.
     var cards = [
-      ['Pending', pending], ['Open findings', open], ['Applied', applied],
-      ['GSC rows', num(gsc.n) + (gsc.latest ? ' · to ' + gsc.latest : '')],
-      ['AI crawls 7d', tel.active ? crawls : '—'],
-      ['AI referrals 7d', tel.active ? num(tel.referral7d) : '—'],
-      ['Cited', cit.total ? (num(cit.cited) + '/' + num(cit.total)) : ((cit.queries && (cit.engines || []).length) ? 'pending' : 'off')]
+      ['Pending', pending, '#proposals'],
+      ['Open findings', open, '#findings'],
+      ['Applied', applied, '#changes'],
+      ['GSC rows', num(gsc.n) + (gsc.latest ? ' · to ' + gsc.latest : ''), '#analytics'],
+      ['AI crawls 7d', tel.active ? crawls : '—', '#analytics'],
+      ['AI referrals 7d', tel.active ? num(tel.referral7d) : '—', '#analytics'],
+      ['Cited', cit.total ? (num(cit.cited) + '/' + num(cit.total)) : ((cit.queries && (cit.engines || []).length) ? 'pending' : 'off'), '#analytics']
     ];
     el('cards').innerHTML = cards.map(function (c) {
-      return '<div class="card"><div class="n">' + esc(c[1]) + '</div><div class="l">' + esc(c[0]) + '</div></div>';
+      // c[2] is a hardcoded literal hash, not user input.
+      return '<a class="card" href="' + c[2] + '"><div class="n">' + esc(c[1]) + '</div><div class="l">' + esc(c[0]) + '</div></a>';
     }).join('');
     var lr = s.lastRun || {};
     el('lastrun').textContent = lr.started_at
@@ -244,43 +329,71 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   }
 
   function renderFindings(list) {
-    el('findsum').textContent = 'Open findings (' + list.length + ')';
     if (!list.length) { el('findings').innerHTML = '<div class="empty">None — all clear.</div>'; return; }
     var rows = list.map(function (f) {
       return '<tr><td><span class="chip ' + esc(f.severity) + '">' + esc(f.severity) + '</span></td>'
         + '<td>' + esc(f.rule) + '</td><td>' + esc(f.path) + '</td>'
         + '<td class="muted">' + esc((f.detail || '').slice(0, 120)) + '</td></tr>';
     }).join('');
-    el('findings').innerHTML = '<table><thead><tr><th>Sev</th><th>Rule</th><th>Path</th><th>Detail</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    el('findings').innerHTML = '<div class="tablewrap"><table><thead><tr><th>Sev</th><th>Rule</th><th>Path</th><th>Detail</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
   }
 
+  // Verdicts live only in the /analytics payload, so the Changes table sources
+  // its rows from /changes (always loaded) and looks the verdict up by change
+  // id from the cached analytics — showing "pending" until analytics lands, then
+  // re-rendered by backfillVerdicts() once it does.
+  function verdictById() {
+    var m = {};
+    ((analyticsData && analyticsData.changes) || []).forEach(function (c) { m[c.id] = c; });
+    return m;
+  }
   function renderChanges(list) {
-    el('chgsum').textContent = 'Applied changes (' + list.filter(function (c) { return !c.reverted_at; }).length + ' live)';
+    list = list || [];
     if (!list.length) { el('changes').innerHTML = '<div class="empty">No changes applied yet.</div>'; return; }
+    var vm = verdictById();
     var rows = list.map(function (c) {
       var reverted = !!c.reverted_at;
+      var vi = vm[c.id] || {};
+      var v = vi.latestVerdict || 'pending';
+      var label = (vi.latestPhase ? (vi.latestPhase + ' ') : '') + String(v).replace('_', ' ');
+      var chip = '<span class="chip ' + esc(v) + '">' + esc(label) + '</span>';
       var action = reverted
         ? '<span class="muted">reverted</span>'
         : '<button class="bad small" data-act="revert" data-id="' + c.id + '">Revert</button>';
       return '<tr style="' + (reverted ? 'opacity:.55' : '') + '"><td>' + c.id + '</td>'
         + '<td>' + esc(c.path) + '</td><td>' + esc(c.field) + '</td>'
         + '<td>' + esc((c.new_value || '').slice(0, 90)) + '</td>'
-        + '<td class="muted">' + esc(c.source) + '</td><td>' + action + '</td></tr>';
+        + '<td class="muted">' + esc(c.source) + '</td>'
+        + '<td class="muted">' + esc((c.applied_at || '').slice(0, 10)) + '</td>'
+        + '<td>' + chip + '</td><td>' + action + '</td></tr>';
     }).join('');
-    el('changes').innerHTML = '<table><thead><tr><th>#</th><th>Path</th><th>Field</th><th>New value</th><th>Src</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>';
+    el('changes').innerHTML = '<div class="tablewrap"><table><thead><tr><th>#</th><th>Path</th><th>Field</th><th>New value</th><th>Src</th><th>Applied</th><th>Verdict</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>';
   }
+  function backfillVerdicts() { renderChanges(state.changes); }
 
   function decide(id, action) {
     var b = document.querySelector('.item[data-id="' + id + '"]');
     if (b) Array.prototype.forEach.call(b.querySelectorAll('button'), function (x) { x.disabled = true; });
     api('/proposals/' + id + '/' + action, { method: 'POST' }).then(function () {
       toast('Proposal #' + id + ' ' + action + (action === 'approve' ? 'd — live in ~5 min' : 'ed'));
+      // Optimistic: drop it from the pending list and refresh the badge now,
+      // then reconcile against the server. An approve also mints a change, so
+      // the cached analytics (verdict source) is stale — invalidate it.
+      state.proposals = (state.proposals || []).filter(function (p) { return p.id !== id; });
+      renderProposals(state.proposals); updateBadges();
+      analyticsData = null;
       load();
     }).catch(function (e) { toast(e.message); load(); });
   }
   function revert(id) {
     api('/changes/' + id + '/revert', { method: 'POST' }).then(function () {
-      toast('Change #' + id + ' reverted'); load();
+      toast('Change #' + id + ' reverted');
+      state.changes = (state.changes || []).map(function (c) {
+        return c.id === id ? Object.assign({}, c, { reverted_at: new Date().toISOString() }) : c;
+      });
+      renderChanges(state.changes);
+      analyticsData = null;
+      load();
     }).catch(function (e) { toast(e.message); });
   }
   function resetRunBtn() { var b = el('runbtn'); b.disabled = false; b.textContent = 'Run pipeline'; }
@@ -335,6 +448,8 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   }
 
   // One delegated click handler — no inline onclick anywhere (cleaner + CSP-friendly).
+  // Tab / card navigation is plain <a href="#…">, handled by the browser + the
+  // hashchange listener, so it needs nothing here.
   document.addEventListener('click', function (e) {
     var t = e.target.closest ? e.target.closest('[data-act]') : null;
     if (!t) return;
@@ -350,6 +465,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
     else if (act === 'revert') revert(Number(id));
   });
   el('tok').addEventListener('keydown', function (e) { if (e.key === 'Enter') doLogin(); });
+  window.addEventListener('hashchange', onHashChange);
 
   // --- Analytics section: client-side inline-SVG charts over /analytics/summary.
   // Kept dependency-free and template-literal-free like the rest of this script.
@@ -478,40 +594,61 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
     return panel('Open findings over time (90d)', '<div class="svgwrap">' + svg + '</div>');
   }
 
-  function buildChangesTable(list) {
-    if (!list || !list.length) return panel('Changes & impact', '<div class="empty">No changes applied yet.</div>');
-    var rows = list.map(function (c) {
-      var v = c.latestVerdict || 'pending';
-      var label = (c.latestPhase ? (c.latestPhase + ' ') : '') + String(v).replace('_', ' ');
-      var chip = '<span class="chip ' + esc(v) + '">' + esc(label) + '</span>';
-      var action = c.reverted_at ? '<span class="muted">reverted</span>' : '<button class="bad small" data-act="revert" data-id="' + c.id + '">Revert</button>';
-      return '<tr style="' + (c.reverted_at ? 'opacity:.55' : '') + '"><td>' + c.id + '</td><td>' + esc(c.path) + '</td><td>' + esc(c.field) + '</td><td class="muted">' + esc((c.applied_at || '').slice(0, 10)) + '</td><td>' + chip + '</td><td>' + action + '</td></tr>';
-    }).join('');
-    return panel('Changes & impact', '<table><thead><tr><th>#</th><th>Path</th><th>Field</th><th>Applied</th><th>Verdict</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>');
-  }
-
   function renderAnalytics(data) {
     data = data || {};
     var html = '';
+    // GSC panel is hidden entirely where GSC is off (e.g. the eo instance).
     if (data.gsc && data.gsc.active) html += buildGsc(data.gsc, data.changes);
     html += buildAeo(data.aeo);
     html += buildCitations(data.citations);
     html += buildFindings(data.findings);
-    html += buildChangesTable(data.changes);
     el('analytics').innerHTML = html;
   }
 
+  // Deferred + session-cached /analytics/summary loader. Fetched on first open
+  // of the Analytics or Changes tab; a mutating action nulls analyticsData to
+  // force a refresh on next open.
+  function ensureAnalytics() {
+    if (analyticsData) { renderAnalytics(analyticsData); backfillVerdicts(); return; }
+    if (analyticsPending) return;
+    analyticsPending = true;
+    el('analytics').innerHTML = '<div class="muted" style="padding:8px 2px"><span class="spin"></span> Loading analytics…</div>';
+    api('/analytics/summary').then(function (d) {
+      analyticsData = d || {};
+      analyticsPending = false;
+      renderAnalytics(analyticsData);
+      backfillVerdicts();
+    }).catch(function (e) {
+      analyticsPending = false;
+      if (e.message !== 'unauthorized') el('analytics').innerHTML = '<div class="empty">Analytics unavailable right now.</div>';
+    });
+  }
+
+  // Core load — everything EXCEPT the deferred /analytics payload. Re-run after
+  // actions and after a pipeline run; tab switches never call it.
   function load() {
     Promise.all([
-      api('/status'), api('/proposals?status=proposed'), api('/findings?status=open'), api('/changes'),
-      api('/analytics/summary').catch(function () { return {}; })
+      api('/status'), api('/proposals?status=proposed'), api('/findings?status=open'), api('/changes')
     ]).then(function (res) {
-      renderCards(res[0]); renderProposals(res[1]); renderFindings(res[2]); renderChanges(res[3]); renderAnalytics(res[4]);
+      state.status = res[0]; state.proposals = res[1]; state.findings = res[2]; state.changes = res[3];
+      renderCards(res[0]);
+      renderProposals(res[1]);
+      renderFindings(res[2]);
+      renderChanges(res[3]);
+      updateBadges();
+      // If the user is already on a tab that needs analytics, (re)load it —
+      // e.g. after an action invalidated the cache.
+      if (currentTab === 'analytics' || currentTab === 'changes') ensureAnalytics();
     }).catch(function (e) { if (e.message !== 'unauthorized') toast(e.message); });
   }
 
+  function boot() {
+    activateTab(resolveHash());
+    load();
+  }
+
   if (!token) showLogin('');
-  else { el('login').style.display = 'none'; el('app').style.display = ''; load(); }
+  else { el('login').style.display = 'none'; el('app').style.display = ''; boot(); }
 })();
 </script>
 </body>
