@@ -86,7 +86,8 @@
     // (secrets below). Gemini grounding needs a BILLING-LINKED Google project
     // (unbilled keys 429); at this volume the cost is ~$0 either way.
     "CITATION_QUERIES": "",
-    // UTC weekday the daily cron probes on (0=Sun … 6=Sat). Default Monday.
+    // UTC weekday the daily cron probes on (0=Sun … 6=Sat). Out-of-range or
+    // non-numeric values (e.g. "7") fall back to Monday (1). Default Monday.
     "CITATION_CRON_DAY": "1"
   }
 

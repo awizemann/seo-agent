@@ -51,9 +51,10 @@ Daily cron (and `POST /run` on demand):
 
 ## Setup
 
-Requirements: a Cloudflare account with Workers (paid plan recommended), wrangler ≥ 4,
-Node ≥ 18, and a site that serves a `sitemap.xml` and has an edge injector able to read
-KV overrides (see [below](#connecting-your-site-the-injector-side)).
+Requirements: a Cloudflare account on the **Workers Paid plan** (the drafting queue
+requires it), wrangler ≥ 4, Node ≥ 18, and a site that serves a `sitemap.xml` — a plain
+`<urlset>`, or a `<sitemapindex>` whose child sitemaps are fetched one level deep — and an
+edge injector able to read KV overrides (see [below](#connecting-your-site-the-injector-side)).
 
 ```sh
 # 1. Clone and install
@@ -233,7 +234,8 @@ emit findings through the same open/auto-resolve lifecycle as every other rule:
 
 Configuration: `AEO_CHECKS` (default on; `"false"` disables) and `AEO_BOT_UA`
 (the UA for the deliverability sample; defaults to a GPTBot user agent). The
-sample prefers pages under `ARTICLE_PATH_PREFIX` when set.
+sample prefers pages under `ARTICLE_PATH_PREFIX` when set, falls back to all
+content pages when none match, and rotates which pages it checks day to day.
 
 ### Recommended robots.txt AI policy
 
@@ -318,9 +320,10 @@ nothing). This project gives you the same behavior on any plan:
   each page at your origin (e.g. `/eo/some-page.md` beside `/eo/some-page`) —
   for static sites, emit them at build time from the same data as the HTML.
   The injector's **markdown lane** (on by default; `MARKDOWN_LANE: "false"`
-  disables) answers any `Accept: text/markdown` GET on a clean URL with the
-  twin, sending `content-type: text/markdown`, `x-markdown-tokens`, and
-  `Vary: accept`, and falls through to the normal proxy when no twin exists.
+  disables) answers any `Accept: text/markdown` GET or HEAD on a clean URL with
+  the twin, sending `content-type: text/markdown`, `x-markdown-tokens`,
+  `content-signal`, and `Vary: accept`, and falls through to the normal proxy
+  when no twin exists.
 - **Worker-fronted sites** should negotiate directly: on a content route whose
   `Accept` includes `text/markdown`, return the page as markdown from your data
   layer (and serve the same document at `<path>.md`), with the same three
@@ -475,6 +478,10 @@ default or is optional. See `wrangler.example.jsonc` for the annotated template.
   for a site whose content publishes at UTC midnight). Cron times are UTC.
 - Worker deploys propagate over ~1–2 minutes; immediately after `npm run deploy`, requests
   can hit the previous version. Poll before diagnosing.
+- Upgrading an existing install: re-run `npm run db:init` after pulling a new version. It's
+  idempotent (every table is `CREATE TABLE IF NOT EXISTS`) and adds any tables a newer
+  version introduced (e.g. `aeo_hits`, `citations`), so `/status` doesn't error on a
+  database that predates them.
 - Reasoning models (e.g. GLM-4.7-Flash) spend tokens thinking before answering — keep
   `max_tokens` generous (the code uses 2048) or `content` comes back empty.
 - Cost at 150 URLs/day: ~150 subrequests + ≤8 small AI drafts — effectively pennies
