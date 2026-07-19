@@ -33,7 +33,7 @@ type Override = { title?: string; description?: string };
 type D1Lite = { prepare(q: string): { bind(...v: unknown[]): { run(): Promise<unknown> } } };
 
 const AI_BOT_RE =
-  /GPTBot|OAI-SearchBot|ChatGPT-User|ClaudeBot|Claude-User|Claude-SearchBot|claude-web|anthropic-ai|PerplexityBot|Perplexity-User|meta-externalagent|meta-externalfetcher|Meta-WebIndexer|Amazonbot|CCBot|Bytespider|MistralAI-User|DuckAssistBot|LinerBot|Applebot(?!-Extended)/i;
+  /GPTBot|OAI-SearchBot|ChatGPT-User|ClaudeBot|Claude-User|Claude-SearchBot|claude-web|anthropic-ai|PerplexityBot|Perplexity-User|meta-externalagent|meta-externalfetcher|Meta-WebIndexer|Amazonbot|CCBot|Bytespider|MistralAI-User|DuckAssistBot|YouBot|LinerBot|Applebot(?!-Extended)/i;
 const AI_REFERRER_RE =
   /chatgpt\.com|chat\.openai\.com|perplexity\.ai|claude\.ai|gemini\.google\.com|bard\.google\.com|copilot\.microsoft\.com|copilot\.com|grok\.com|meta\.ai|deepseek\.com|you\.com|poe\.com/i;
 
@@ -100,19 +100,38 @@ function inject(res: Response, o: Override): Response {
   return rw.transform(res);
 }
 
+// Default markdown-lane policy header, matching the main site worker's tap.
+const CONTENT_SIGNAL = 'ai-train=yes, search=yes, ai-input=yes';
+
+/** Append a token to Vary without dropping any value the origin already set. */
+function appendVary(headers: Headers, token: string): void {
+  const existing = headers.get('vary');
+  if (!existing) {
+    headers.set('vary', token);
+    return;
+  }
+  if (!existing.split(',').some((v) => v.trim().toLowerCase() === token.toLowerCase())) {
+    headers.set('vary', `${existing}, ${token}`);
+  }
+}
+
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
     const originUrl = `https://${env.ORIGIN_HOST}${url.pathname}${url.search}`;
+    // Clone up front so the fail-open catch can re-issue the origin request even
+    // after the primary fetch consumed request's body (a POST/PUT with a body).
+    const fallback = request.clone();
     try {
-      // Markdown lane ("markdown for agents"): a GET that accepts text/markdown
-      // on a clean URL is answered with the origin's pregenerated .md twin when
-      // one exists (/eo/x → /eo/x.md), with Cloudflare-compatible headers.
-      // Browsers never send that Accept value; anything without a twin falls
-      // through to the normal proxy. MARKDOWN_LANE="false" disables.
+      // Markdown lane ("markdown for agents"): a GET or HEAD that accepts
+      // text/markdown on a clean URL is answered with the origin's pregenerated
+      // .md twin when one exists (/eo/x → /eo/x.md), with Cloudflare-compatible
+      // headers. Browsers never send that Accept value; anything without a twin
+      // falls through to the normal proxy. MARKDOWN_LANE="false" disables.
       const mdEnv = env as Env & { MARKDOWN_LANE?: string };
+      const isHead = request.method === 'HEAD';
       const wantsMd =
-        request.method === 'GET' &&
+        (request.method === 'GET' || isHead) &&
         !/^(false|0|off)$/i.test(mdEnv.MARKDOWN_LANE ?? '') &&
         (request.headers.get('accept') || '').includes('text/markdown') &&
         !/\.[A-Za-z0-9]+$/.test(url.pathname);
@@ -125,10 +144,12 @@ export default {
           if (mdRes.ok && !(mdRes.headers.get('content-type') || '').includes('text/html')) {
             const body = await mdRes.text();
             tapAeo(env, ctx, request, url.pathname, 200, 'md');
-            return new Response(body, {
+            // HEAD: same headers as GET, no body.
+            return new Response(isHead ? null : body, {
               headers: {
                 'content-type': 'text/markdown; charset=utf-8',
                 'x-markdown-tokens': String(Math.ceil(body.length / 4)),
+                'content-signal': CONTENT_SIGNAL,
                 vary: 'accept',
               },
             });
@@ -139,16 +160,25 @@ export default {
       }
 
       const res = await fetch(new Request(originUrl, request));
+      const contentType = res.headers.get('content-type') || '';
 
-      // Only HTML pages carry the meta we patch; assets/sitemap/robots stream through.
-      if (!(res.headers.get('content-type') || '').includes('text/html')) {
-        tapAeo(env, ctx, request, url.pathname, res.status, 'file');
+      // Only HTML pages carry the meta we patch; assets/sitemap/robots stream
+      // through. A markdown file served directly by the origin (a direct .md
+      // fetch, or upstream Accept negotiation) taps as 'md', not 'file'.
+      if (!contentType.includes('text/html')) {
+        tapAeo(env, ctx, request, url.pathname, res.status, contentType.includes('text/markdown') ? 'md' : 'file');
         return res;
       }
 
       tapAeo(env, ctx, request, url.pathname, res.status, 'html');
       const override = await readOverride(env, url.pathname);
-      if (!override) return res;
+      // The same URL can serve markdown via Accept negotiation, so an HTML
+      // response varies by Accept — even when we pass it through untouched.
+      if (!override) {
+        const headers = new Headers(res.headers);
+        appendVary(headers, 'accept');
+        return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+      }
 
       const rewritten = inject(res, override);
       const headers = new Headers(rewritten.headers);
@@ -160,10 +190,11 @@ export default {
       headers.delete('last-modified');
       headers.delete('content-encoding');
       headers.delete('content-length');
+      appendVary(headers, 'accept');
       return new Response(rewritten.body, { status: res.status, statusText: res.statusText, headers });
     } catch (err) {
       console.error(JSON.stringify({ evt: 'injector_fail_open', error: err instanceof Error ? err.message : String(err) }));
-      return fetch(originUrl, request); // fail-open: serve the origin directly
+      return fetch(originUrl, fallback); // fail-open: serve the origin with an unconsumed body
     }
   },
 } satisfies ExportedHandler<Env>;
