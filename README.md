@@ -381,6 +381,80 @@ The outcome metric: do the engines **cite you** for the queries you care about?
 - Caveat: engine APIs are a *proxy* for the consumer UIs (different retrieval
   stacks). Track the deltas, not the absolute numbers.
 
+## Analytics
+
+The agent keeps a longitudinal record of how the site is doing and whether its
+own changes helped — assembled read-only by `analytics.ts` and surfaced on the
+dashboard, over the API, and via MCP.
+
+**What's measured**
+
+- **Search performance over time** — GSC clicks, impressions, CTR, and average
+  position, summed across all pages, daily for 90 days.
+- **AI traffic** — daily crawler / referral / agent counts for 30 days, plus
+  **permanent weekly rollups** (`aeo_weekly`): `aeo_hits` is pruned at 90 days,
+  but completed-ISO-week aggregates survive the prune, so AI-traffic history
+  never disappears. Also the top AI bots of the last 7 days.
+- **Citations over time** — every probe result (per engine × query: cited, rank)
+  across all history.
+- **Open findings over time** — a daily open-count series by severity for 90
+  days, computed from the findings' `created_at` / `resolved_at`.
+- **Per-change impact** — did each applied override help or hurt the page it
+  changed? (below)
+
+**GSC backfill.** GSC sensing ingests only a trailing ~3-day window per run, so
+a fresh install has almost no history. The first time the sense runs against a
+database with fewer than 30 distinct dates of GSC data, it **backfills ~90 days
+once** (date-chunked, paged, API-call-capped, `INSERT OR REPLACE`), then never
+again — once history exists the trigger is false. It only runs where GSC is
+configured.
+
+**Change-impact verdicts — correlation, not causation.** For every un-reverted
+change the impact engine compares GSC metrics for the changed page across a
+**before** window (ending the day before the change) and an **after** window
+(starting 4 days later, after a 3-day settle gap), at two ages: **d14** (14-day
+windows) and **d28** (28-day). Clicks and impressions are stored as **per-day
+rates** so unequal effective windows still compare; CTR and position are
+**impression-weighted**. Computability is decided from the GSC data's own
+`MAX(date)` (not the wall clock), so a phase is only judged once its after-window
+is actually covered — d14 at ~change+18d, d28 at ~change+31d (plus GSC's 2-day
+lag). A change is frozen once its d28 verdict lands; reverted changes get no new
+verdicts.
+
+The verdict is a **pure, unit-tested** function with blunt, named thresholds:
+
+- **`insufficient_data`** (a first-class, common outcome) — the two windows total
+  under **50 impressions**, or either window has no data.
+- **`helped`** — relative CTR rises **≥ +15%**, or average position improves by
+  **≥ 1.0** (lower is better) without impressions dropping more than **20%**.
+- **`hurt`** — the mirror: CTR falls **≤ −15%**, or position worsens by **≥ 1.0**
+  without an impression surge (>20%) that would mechanically explain it.
+- **`neutral`** — no strong signal, or conflicting helped-and-hurt signals.
+
+Every denominator is guarded (a zero baseline CTR or position simply isn't
+evaluated). **A `hurt` verdict is a prompt to look, never proof the change caused
+the drop** — SEO moves for algorithm updates, seasonality, competitors, and
+query-mix drift too. A latest-phase `hurt` on an un-reverted change opens a
+`change_hurt` finding ("consider reverting change #N"); a `helped` opens an
+info-level `change_helped`. Both re-trigger while the state holds and auto-resolve
+when the change is reverted or the verdict moves.
+
+**API** (all bearer-gated, and degrade to empty on a DB that predates the new
+tables — never 500):
+
+| Endpoint | What it does |
+| --- | --- |
+| `GET /analytics/summary` | The whole dashboard payload: `gsc` (active + 90d daily), `aeo` (30d daily + weekly rollups + top bots 7d), `citations` (active + full series), `findings` (90d open-count series), `changes` (each with its latest verdict) |
+| `GET /analytics/page?path=/x` | One page: 90d GSC series, its changes with their impact rows, 30d AI-hit counts |
+| `GET /analytics/impact` | Every `change_impact` row joined with its change (path, field, applied_at, verdict) |
+
+**MCP:** `get_analytics` (the `/analytics/summary` object) and `get_change_impact`
+(impact rows, optionally for one `change_id`, plus the verdict methodology).
+
+**Upgrading?** The engine adds two tables (`change_impact`, `aeo_weekly`). Re-run
+`npm run db:init` (idempotent) once to create them — until then the analytics
+endpoints degrade to empty rather than error.
+
 ## Review dashboard
 
 A self-contained human UI is served by the Worker itself at **`GET /`** (and
@@ -391,8 +465,12 @@ can: see status cards (pending / open findings / applied / GSC freshness), revie
 pending proposals with a strikethrough-current-vs-proposed diff and approve or
 reject each, trigger a pipeline run, draft a description on demand (dry run) and
 promote it to a proposal, browse open findings, and revert any applied change
-from the journal. It's the fastest way to clear the daily batch — open the URL,
-review, tap approve.
+from the journal. An **Analytics** section renders hand-rolled inline-SVG charts
+over `/analytics/summary` — GSC clicks/impressions lines with a tick at each
+change, stacked AI-traffic bars with a top-bots list, a citations grid, an
+open-findings-over-time area, and a changes table with a helped/hurt verdict chip
+per change (GSC panel hidden where GSC is off). It's the fastest way to clear the
+daily batch — open the URL, review, tap approve.
 
 ## MCP control surface
 
@@ -407,11 +485,11 @@ claude mcp add --transport http seo-agent https://<worker-host>/mcp \
 
 Any Claude session can then drive the agent conversationally — "what did the SEO
 agent find overnight?", "approve proposal 7", "draft me three alternatives for
-/press", "which AI bots crawled us this week?" — via the tools: `seo_status`,
-`run_pipeline`, `list_findings`, `list_proposals`, `approve_proposal`,
-`reject_proposal`, `create_proposal`, `dry_run_draft`, `list_changes`,
-`revert_change`, `list_overrides`, `list_crawler_hits`, `list_citations`,
-`run_citation_check`.
+/press", "which AI bots crawled us this week?", "did change 12 help or hurt?" —
+via the 16 tools: `seo_status`, `run_pipeline`, `list_findings`, `list_proposals`,
+`approve_proposal`, `reject_proposal`, `create_proposal`, `dry_run_draft`,
+`list_changes`, `revert_change`, `list_overrides`, `list_crawler_hits`,
+`list_citations`, `run_citation_check`, `get_analytics`, `get_change_impact`.
 
 ## Control API
 
@@ -433,6 +511,9 @@ All endpoints require `Authorization: Bearer <AGENT_TOKEN>` (the MCP endpoint to
 | `GET /aeo/hits?days=7` | AI-traffic telemetry: crawler fetches, AI referrals, markdown-lane responses |
 | `GET /aeo/citations` | Citation-probe results (engine × query: cited, rank, cited URL), newest first |
 | `POST /aeo/citations/run` | Probe all configured engines with every citation query now |
+| `GET /analytics/summary` | Metrics over time + per-change verdicts (see [Analytics](#analytics)) |
+| `GET /analytics/page?path=/x` | One page: GSC series, its changes + impact rows, AI-hit counts |
+| `GET /analytics/impact` | Every change-impact row joined with its change |
 
 ## Configuration
 
