@@ -6,6 +6,7 @@
  * with no deploy event.
  */
 
+import { siteConfig } from './config.js';
 import { VERSION } from './version.js';
 
 const USER_AGENT = `seo-agent/${VERSION} (self-audit; +https://github.com/awizemann/seo-agent)`;
@@ -148,7 +149,7 @@ async function fetchPage(entry: SitemapEntry): Promise<PageSnapshot> {
 }
 
 export async function runCrawl(env: Env, runId: number): Promise<{ runId: number; snapshots: PageSnapshot[] }> {
-  const origin = new URL(env.SITE_URL).origin;
+  const origin = new URL(siteConfig(env).siteUrl).origin;
   const sitemapRes = await fetch(`${origin}/sitemap.xml`, {
     headers: { 'user-agent': USER_AGENT },
     signal: AbortSignal.timeout(PAGE_TIMEOUT_MS),

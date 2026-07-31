@@ -3,6 +3,12 @@
  * generic fallbacks so the agent runs against ANY site with zero code edits.
  * Set these in wrangler.jsonc `vars` (see wrangler.example.jsonc). Only SITE_URL
  * is required; the rest tune behavior and default to safe generic values.
+ *
+ * The resolution itself is PURE DATA (resolveSiteConfig): it takes a plain
+ * record of var names, not the Worker Env, so a multi-tenant host can hydrate a
+ * site profile from a database row. siteConfigFromEnv is the Worker adapter.
+ * SECRETS (API keys, the service-account JSON, AGENT_TOKEN) deliberately never
+ * enter SiteConfig — they stay on Env and are read at their point of use.
  */
 export type SiteConfig = {
   siteUrl: string;
@@ -21,26 +27,122 @@ export type SiteConfig = {
   aeoChecks: boolean;
   /** User agent for the AI deliverability sample fetches (defaults to a GPTBot UA). */
   aeoBotUa: string;
+  /** Workers AI model id used for drafting. */
+  aiModel: string;
+  /** Per-run cap on drafting jobs enqueued; 0 (or unparseable) disables proposing. */
+  maxProposalsPerRun: number;
+  /** Fields applied without approval, parsed from the comma-separated var. [] = approval required. */
+  autoApplyFields: string[];
+  /** Search Console property (e.g. "sc-domain:example.com"). "" when GSC is not configured. */
+  gscProperty: string;
+  /** Citation-probe settings; engine enablement stays key-derived in citations.ts. */
+  citations: {
+    queries: string[];
+    /** UTC weekday 0 (Sun) – 6 (Sat) the weekly probe runs on. Defaults to Monday. */
+    cronDay: number;
+    geminiModel: string;
+    perplexityModel: string;
+    openaiModel: string;
+    anthropicModel: string;
+  };
 };
 
-export function siteConfig(env: Env): SiteConfig {
-  const host = new URL(env.SITE_URL).hostname;
-  // Optional-cast so upgraded deployments whose wrangler.jsonc predates these
-  // vars still typecheck (wrangler types only emits vars present in the config).
-  const e = env as Env & { AEO_CHECKS?: string; AEO_BOT_UA?: string };
+/** CITATION_QUERIES accepts a JSON array or |- / newline-separated text. */
+export function parseQueries(raw: string): string[] {
+  const t = (raw || '').trim();
+  if (!t) return [];
+  if (t.startsWith('[')) {
+    try {
+      const a = JSON.parse(t);
+      if (Array.isArray(a)) return a.map(String).map((s) => s.trim()).filter(Boolean);
+    } catch {
+      // fall through to separator parsing
+    }
+  }
+  return t.split(/\||\n/).map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * CITATION_CRON_DAY is a UTC weekday 0 (Sun) – 6 (Sat). Anything out of range or
+ * non-numeric — e.g. "7", which getUTCDay() never returns, silently disabling
+ * probes forever — falls back to Monday (1). Exported for tests.
+ */
+export function clampCronDay(raw: string | undefined): number {
+  const d = parseInt(raw ?? '', 10);
+  return Number.isInteger(d) && d >= 0 && d <= 6 ? d : 1;
+}
+
+/** Resolve a site profile from a plain var record. Pure — no Env, no I/O. */
+export function resolveSiteConfig(vars: Record<string, string | undefined>): SiteConfig {
+  const siteUrl = vars.SITE_URL ?? '';
+  const host = new URL(siteUrl).hostname;
   return {
-    siteUrl: env.SITE_URL,
-    siteName: env.SITE_NAME || host,
-    siteDescription: env.SITE_DESCRIPTION || `the website at ${host}`,
-    titleBrandSuffix: env.TITLE_BRAND_SUFFIX || '',
-    shellTitle: env.SHELL_TITLE || '',
-    articlePathPrefix: env.ARTICLE_PATH_PREFIX || '',
-    articleApiTemplate: env.ARTICLE_API_TEMPLATE || '',
-    aeoChecks: !/^(false|0|off)$/i.test(e.AEO_CHECKS ?? ''),
+    siteUrl,
+    siteName: vars.SITE_NAME || host,
+    siteDescription: vars.SITE_DESCRIPTION || `the website at ${host}`,
+    titleBrandSuffix: vars.TITLE_BRAND_SUFFIX || '',
+    shellTitle: vars.SHELL_TITLE || '',
+    articlePathPrefix: vars.ARTICLE_PATH_PREFIX || '',
+    articleApiTemplate: vars.ARTICLE_API_TEMPLATE || '',
+    aeoChecks: !/^(false|0|off)$/i.test(vars.AEO_CHECKS ?? ''),
     // The trailing "seo-agent-sample" marker lets telemetry taps ignore the
     // agent's own deliverability probes (they'd otherwise count as GPTBot).
     aeoBotUa:
-      e.AEO_BOT_UA ||
+      vars.AEO_BOT_UA ||
       'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; GPTBot/1.2; +https://openai.com/gptbot; seo-agent-sample',
+    aiModel: vars.AI_MODEL || '',
+    maxProposalsPerRun: Math.max(0, parseInt(vars.MAX_PROPOSALS_PER_RUN ?? '', 10) || 0),
+    autoApplyFields: (vars.AUTO_APPLY_FIELDS || '').split(',').map((f) => f.trim()).filter(Boolean),
+    gscProperty: vars.GSC_PROPERTY || '',
+    citations: {
+      queries: parseQueries(vars.CITATION_QUERIES ?? ''),
+      cronDay: clampCronDay(vars.CITATION_CRON_DAY),
+      geminiModel: vars.CITATION_GEMINI_MODEL || 'gemini-flash-latest',
+      perplexityModel: vars.CITATION_PERPLEXITY_MODEL || 'sonar',
+      openaiModel: vars.CITATION_OPENAI_MODEL || 'gpt-5-mini',
+      anthropicModel: vars.CITATION_ANTHROPIC_MODEL || 'claude-sonnet-5',
+    },
   };
 }
+
+/**
+ * Worker adapter: map Env vars into the plain record resolveSiteConfig wants.
+ * Optional-cast so upgraded deployments whose wrangler.jsonc predates a var
+ * still typecheck (wrangler types only emits vars present in the config).
+ */
+export function siteConfigFromEnv(env: Env): SiteConfig {
+  const e = env as Env & {
+    AEO_CHECKS?: string;
+    AEO_BOT_UA?: string;
+    CITATION_QUERIES?: string;
+    CITATION_CRON_DAY?: string;
+    CITATION_GEMINI_MODEL?: string;
+    CITATION_PERPLEXITY_MODEL?: string;
+    CITATION_OPENAI_MODEL?: string;
+    CITATION_ANTHROPIC_MODEL?: string;
+  };
+  return resolveSiteConfig({
+    SITE_URL: e.SITE_URL,
+    SITE_NAME: e.SITE_NAME,
+    SITE_DESCRIPTION: e.SITE_DESCRIPTION,
+    TITLE_BRAND_SUFFIX: e.TITLE_BRAND_SUFFIX,
+    SHELL_TITLE: e.SHELL_TITLE,
+    ARTICLE_PATH_PREFIX: e.ARTICLE_PATH_PREFIX,
+    ARTICLE_API_TEMPLATE: e.ARTICLE_API_TEMPLATE,
+    AEO_CHECKS: e.AEO_CHECKS,
+    AEO_BOT_UA: e.AEO_BOT_UA,
+    AI_MODEL: e.AI_MODEL,
+    MAX_PROPOSALS_PER_RUN: e.MAX_PROPOSALS_PER_RUN,
+    AUTO_APPLY_FIELDS: e.AUTO_APPLY_FIELDS,
+    GSC_PROPERTY: e.GSC_PROPERTY,
+    CITATION_QUERIES: e.CITATION_QUERIES,
+    CITATION_CRON_DAY: e.CITATION_CRON_DAY,
+    CITATION_GEMINI_MODEL: e.CITATION_GEMINI_MODEL,
+    CITATION_PERPLEXITY_MODEL: e.CITATION_PERPLEXITY_MODEL,
+    CITATION_OPENAI_MODEL: e.CITATION_OPENAI_MODEL,
+    CITATION_ANTHROPIC_MODEL: e.CITATION_ANTHROPIC_MODEL,
+  });
+}
+
+/** Alias kept so existing callers compile unchanged. */
+export const siteConfig = siteConfigFromEnv;

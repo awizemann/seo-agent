@@ -15,6 +15,7 @@
  * the common one for low-traffic pages. Thresholds below are deliberately blunt.
  */
 
+import { siteConfig } from './config.js';
 import { pageToPath, pageCandidates } from './pagepath.js';
 import type { Triggered } from './rules.js';
 
@@ -287,7 +288,7 @@ const pct = (before: number, after: number): string => {
 export async function impactFindings(env: Env): Promise<Triggered[]> {
   if (!env.GSC_SERVICE_ACCOUNT_JSON) return []; // GSC not configured (e.g. the eo instance)
 
-  const siteUrl = env.SITE_URL;
+  const siteUrl = siteConfig(env).siteUrl;
   await computeImpacts(env, siteUrl);
 
   // Latest phase per change (d28 outranks d14), un-reverted only.

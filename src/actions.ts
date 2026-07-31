@@ -203,6 +203,7 @@ export async function statusData(env: Env) {
       .catch(() => null),
   ]);
   const citCfg = citationConfig(env);
+  const cfg = siteConfig(env);
   return {
     lastRun,
     running,
@@ -221,9 +222,9 @@ export async function statusData(env: Env) {
       },
     },
     config: {
-      autoApplyFields: env.AUTO_APPLY_FIELDS || '(none — approval required)',
-      model: env.AI_MODEL,
-      aeoChecks: siteConfig(env).aeoChecks,
+      autoApplyFields: cfg.autoApplyFields.join(',') || '(none — approval required)',
+      model: cfg.aiModel,
+      aeoChecks: cfg.aeoChecks,
     },
   };
 }

@@ -17,22 +17,22 @@
  * latest check) and citation_gained (newly cited, event-style).
  */
 
-import { siteConfig } from './config.js';
+import { siteConfig, type SiteConfig } from './config.js';
 import type { Triggered } from './rules.js';
+
+// The var-derived citation settings now live in SiteConfig; these pure helpers
+// moved there with them and are re-exported so callers/tests keep one import.
+export { parseQueries, clampCronDay } from './config.js';
 
 export type CitationSource = { url?: string; domain?: string; title?: string };
 
+// Only the SECRETS stay on the env here — model ids and queries come from
+// SiteConfig, and engine enablement is still derived from key presence.
 type CitEnv = Env & {
-  CITATION_QUERIES?: string;
-  CITATION_CRON_DAY?: string;
   GEMINI_API_KEY?: string;
   PERPLEXITY_API_KEY?: string;
   OPENAI_API_KEY?: string;
   ANTHROPIC_API_KEY?: string;
-  CITATION_GEMINI_MODEL?: string;
-  CITATION_PERPLEXITY_MODEL?: string;
-  CITATION_OPENAI_MODEL?: string;
-  CITATION_ANTHROPIC_MODEL?: string;
 };
 
 const PROBE_TIMEOUT_MS = 45_000;
@@ -40,21 +40,6 @@ const PROBE_TIMEOUT_MS = 45_000;
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for tests)
 // ---------------------------------------------------------------------------
-
-/** CITATION_QUERIES accepts a JSON array or |- / newline-separated text. */
-export function parseQueries(raw: string): string[] {
-  const t = (raw || '').trim();
-  if (!t) return [];
-  if (t.startsWith('[')) {
-    try {
-      const a = JSON.parse(t);
-      if (Array.isArray(a)) return a.map(String).map((s) => s.trim()).filter(Boolean);
-    } catch {
-      // fall through to separator parsing
-    }
-  }
-  return t.split(/\||\n/).map((s) => s.trim()).filter(Boolean);
-}
 
 /** First source whose host is (a subdomain of) the site's host. */
 export function matchSite(sources: CitationSource[], siteHost: string): { rank: number | null; url: string | null } {
@@ -144,15 +129,15 @@ async function post(url: string, headers: Record<string, string>, body: unknown)
 type EngineDef = {
   name: string;
   enabled(env: CitEnv): boolean;
-  call(env: CitEnv, query: string): Promise<CitationSource[]>;
+  call(env: CitEnv, cfg: SiteConfig, query: string): Promise<CitationSource[]>;
 };
 
 const ENGINES: EngineDef[] = [
   {
     name: 'gemini',
     enabled: (env) => !!env.GEMINI_API_KEY,
-    call: async (env, query) => {
-      const model = env.CITATION_GEMINI_MODEL || 'gemini-flash-latest';
+    call: async (env, cfg, query) => {
+      const model = cfg.citations.geminiModel;
       const data = await post(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
         { 'x-goog-api-key': env.GEMINI_API_KEY! },
@@ -164,11 +149,11 @@ const ENGINES: EngineDef[] = [
   {
     name: 'perplexity',
     enabled: (env) => !!env.PERPLEXITY_API_KEY,
-    call: async (env, query) => {
+    call: async (env, cfg, query) => {
       const data = await post(
         'https://api.perplexity.ai/chat/completions',
         { authorization: `Bearer ${env.PERPLEXITY_API_KEY}` },
-        { model: env.CITATION_PERPLEXITY_MODEL || 'sonar', messages: [{ role: 'user', content: query }] }
+        { model: cfg.citations.perplexityModel, messages: [{ role: 'user', content: query }] }
       );
       return extractPerplexity(data);
     },
@@ -176,11 +161,11 @@ const ENGINES: EngineDef[] = [
   {
     name: 'openai',
     enabled: (env) => !!env.OPENAI_API_KEY,
-    call: async (env, query) => {
+    call: async (env, cfg, query) => {
       const data = await post(
         'https://api.openai.com/v1/responses',
         { authorization: `Bearer ${env.OPENAI_API_KEY}` },
-        { model: env.CITATION_OPENAI_MODEL || 'gpt-5-mini', input: query, tools: [{ type: 'web_search' }] }
+        { model: cfg.citations.openaiModel, input: query, tools: [{ type: 'web_search' }] }
       );
       return extractOpenAI(data);
     },
@@ -188,12 +173,12 @@ const ENGINES: EngineDef[] = [
   {
     name: 'anthropic',
     enabled: (env) => !!env.ANTHROPIC_API_KEY,
-    call: async (env, query) => {
+    call: async (env, cfg, query) => {
       const data = await post(
         'https://api.anthropic.com/v1/messages',
         { 'x-api-key': env.ANTHROPIC_API_KEY!, 'anthropic-version': '2023-06-01' },
         {
-          model: env.CITATION_ANTHROPIC_MODEL || 'claude-sonnet-5',
+          model: cfg.citations.anthropicModel,
           max_tokens: 1024,
           messages: [{ role: 'user', content: query }],
           tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }],
@@ -208,22 +193,12 @@ const ENGINES: EngineDef[] = [
 // The probe runner + findings
 // ---------------------------------------------------------------------------
 
-/**
- * CITATION_CRON_DAY is a UTC weekday 0 (Sun) – 6 (Sat). Anything out of range or
- * non-numeric — e.g. "7", which getUTCDay() never returns, silently disabling
- * probes forever — falls back to Monday (1). Exported for tests.
- */
-export function clampCronDay(raw: string | undefined): number {
-  const d = parseInt(raw ?? '', 10);
-  return Number.isInteger(d) && d >= 0 && d <= 6 ? d : 1;
-}
-
 export function citationConfig(env: Env): { queries: string[]; engines: string[]; cronDay: number } {
-  const e = env as CitEnv;
+  const cfg = siteConfig(env);
   return {
-    queries: parseQueries(e.CITATION_QUERIES ?? ''),
-    engines: ENGINES.filter((x) => x.enabled(e)).map((x) => x.name),
-    cronDay: clampCronDay(e.CITATION_CRON_DAY),
+    queries: cfg.citations.queries,
+    engines: ENGINES.filter((x) => x.enabled(env as CitEnv)).map((x) => x.name),
+    cronDay: cfg.citations.cronDay,
   };
 }
 
@@ -241,7 +216,8 @@ export async function runCitationProbes(env: Env): Promise<{
   skipped?: string;
 }> {
   const e = env as CitEnv;
-  const { queries } = citationConfig(env);
+  const cfg = siteConfig(env);
+  const queries = cfg.citations.queries;
   const engines = ENGINES.filter((x) => x.enabled(e));
   if (queries.length === 0 || engines.length === 0) {
     return {
@@ -253,7 +229,7 @@ export async function runCitationProbes(env: Env): Promise<{
     };
   }
 
-  const host = new URL(siteConfig(env).siteUrl).hostname;
+  const host = new URL(cfg.siteUrl).hostname;
   const checkedAt = new Date().toISOString();
   const insert = env.DB.prepare(
     'INSERT INTO citations (checked_at, engine, query, cited, rank, cited_url, total_sources, sources, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
@@ -266,7 +242,7 @@ export async function runCitationProbes(env: Env): Promise<{
       let sources: CitationSource[] = [];
       let error: string | null = null;
       try {
-        sources = await engine.call(e, query);
+        sources = await engine.call(e, cfg, query);
       } catch (err) {
         error = (err instanceof Error ? err.message : String(err)).slice(0, 700);
         errors++;

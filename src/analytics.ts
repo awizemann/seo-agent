@@ -9,6 +9,7 @@
  * the endpoints still return 200 (statusData does the same for aeo/citations).
  */
 
+import { siteConfig } from './config.js';
 import { pageToPath, pageCandidates } from './pagepath.js';
 import { addDays } from './impact.js';
 import { citationConfig } from './citations.js';
@@ -52,7 +53,8 @@ export function openFindingsSeries(rows: FindingRow[], days: number): OpenFindin
 
 /** A single path's GSC daily series (impression-weighted ctr/position). */
 async function gscDailyForPath(env: Env, path: string, sinceDate: string) {
-  const candidates = pageCandidates(path, env.SITE_URL);
+  const siteUrl = siteConfig(env).siteUrl;
+  const candidates = pageCandidates(path, siteUrl);
   const placeholders = candidates.map(() => '?').join(', ');
   const rows = (
     await env.DB.prepare(
@@ -63,7 +65,7 @@ async function gscDailyForPath(env: Env, path: string, sinceDate: string) {
   ).results;
   const byDate = new Map<string, { clicks: number; impressions: number; posWeighted: number }>();
   for (const r of rows) {
-    if (pageToPath(r.page, env.SITE_URL) !== path) continue;
+    if (pageToPath(r.page, siteUrl) !== path) continue;
     const cur = byDate.get(r.date) ?? { clicks: 0, impressions: 0, posWeighted: 0 };
     cur.clicks += r.clicks;
     cur.impressions += r.impressions;
@@ -197,7 +199,7 @@ async function changesWithVerdict(env: Env) {
 /** GET /analytics/page?path=/x — one page's GSC series, changes + impact, AI hits. */
 export async function analyticsPage(env: Env, path: string) {
   if (!path) return { error: 'path required' };
-  const p = pageToPath(path, env.SITE_URL);
+  const p = pageToPath(path, siteConfig(env).siteUrl);
 
   const gsc = await gscDailyForPath(env, p, dateDaysAgo(90)).catch(() => []);
 

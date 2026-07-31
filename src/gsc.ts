@@ -5,6 +5,8 @@
  * lags ~2 days, so each run re-pulls a trailing window and upserts.
  */
 
+import { siteConfig } from './config.js';
+
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const SCOPE = 'https://www.googleapis.com/auth/webmasters.readonly';
 const ROW_LIMIT = 5000;
@@ -153,7 +155,7 @@ export async function ingestGsc(
   const token = await accessToken(sa);
   const startDate = isoDaysAgo(LAG_DAYS + WINDOW_DAYS - 1);
   const endDate = isoDaysAgo(LAG_DAYS);
-  const endpoint = `https://searchconsole.googleapis.com/webmasters/v3/sites/${encodeURIComponent(env.GSC_PROPERTY)}/searchAnalytics/query`;
+  const endpoint = `https://searchconsole.googleapis.com/webmasters/v3/sites/${encodeURIComponent(siteConfig(env).gscProperty)}/searchAnalytics/query`;
 
   const { rows } = await fetchRange(token, endpoint, startDate, endDate);
   await upsertRows(env, rows);

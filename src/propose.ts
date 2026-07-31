@@ -117,7 +117,7 @@ export async function draftWithTrace(
     // thinking before emitting content — 160 starved it to content:null.
     let out: unknown;
     try {
-      out = await withTimeout(ai.run(env.AI_MODEL, { messages, max_tokens: 2048 }), AI_CALL_TIMEOUT_MS);
+      out = await withTimeout(ai.run(cfg.aiModel, { messages, max_tokens: 2048 }), AI_CALL_TIMEOUT_MS);
     } catch (err) {
       // Treat a timeout/error as a failed attempt, not a thrown run: the batch
       // continues with the next candidate instead of dying here.
@@ -159,7 +159,7 @@ export type DraftJob = {
  * never stall the run or exceed an invocation budget.
  */
 export async function enqueueCandidates(env: Env, runId: number): Promise<{ enqueued: number }> {
-  const max = Math.max(0, parseInt(env.MAX_PROPOSALS_PER_RUN, 10) || 0);
+  const max = siteConfig(env).maxProposalsPerRun;
   if (max === 0) return { enqueued: 0 };
 
   const candidates = (
@@ -204,6 +204,7 @@ export async function draftAndCreate(env: Env, job: DraftJob): Promise<void> {
     .first();
   if (existing) return;
 
+  const cfg = siteConfig(env);
   const value = await draft(env, { path: job.path, title: job.title, current: job.current });
   if (!value) return; // invalid after retries — drop; the open finding re-enqueues next run
 
@@ -212,10 +213,10 @@ export async function draftAndCreate(env: Env, job: DraftJob): Promise<void> {
     `INSERT INTO proposals (created_at, finding_id, path, field, current_value, proposed_value, rationale, model)
      VALUES (?, ?, ?, 'description', ?, ?, ?, ?) RETURNING id`
   )
-    .bind(now, job.findingId, job.path, job.current, value, job.rule, env.AI_MODEL)
+    .bind(now, job.findingId, job.path, job.current, value, job.rule, cfg.aiModel)
     .first<{ id: number }>();
 
-  const autoFields = new Set(env.AUTO_APPLY_FIELDS.split(',').map((f) => f.trim()).filter(Boolean));
+  const autoFields = new Set(cfg.autoApplyFields);
   if (proposal && autoFields.has('description')) {
     await applyOverride(env, { path: job.path, field: 'description', value, oldValue: job.current, source: 'auto', proposalId: proposal.id });
     await env.DB.prepare("UPDATE proposals SET status = 'approved', decided_at = ?, applied_at = ? WHERE id = ?")
