@@ -233,9 +233,9 @@ export async function runCrawl(
  * Rules only ever read the current run and the single previous ok run, so older
  * snapshots have no reader. The crawl_runs rows themselves are tiny and kept.
  */
-export async function prunePageSnapshots(db: D1Database): Promise<void> {
+export async function prunePageSnapshots(deps: Pick<AgentDeps, 'db'>): Promise<void> {
   const cutoff = new Date(Date.now() - SNAPSHOT_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
-  await db.prepare('DELETE FROM page_snapshots WHERE run_id IN (SELECT id FROM crawl_runs WHERE started_at < ?)')
+  await deps.db.prepare('DELETE FROM page_snapshots WHERE run_id IN (SELECT id FROM crawl_runs WHERE started_at < ?)')
     .bind(cutoff)
     .run();
 }

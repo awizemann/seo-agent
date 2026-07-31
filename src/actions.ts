@@ -136,7 +136,7 @@ export async function runPipeline(deps: AgentDeps, runId: number) {
       // retention pruning is best-effort
     }
     try {
-      await prunePageSnapshots(deps.db);
+      await prunePageSnapshots(deps);
     } catch {
       // retention pruning is best-effort
     }

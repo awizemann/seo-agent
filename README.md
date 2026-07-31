@@ -658,7 +658,9 @@ host application (e.g. a multi-tenant control plane) can drive the agent per sit
 with a profile loaded from a database row instead of from `wrangler.jsonc` vars.
 
 There's no build step and no npm publish: consume it as a git dependency pinned to a
-tag, and import the TypeScript source through the `./lib` export.
+tag, and import the TypeScript source from the package root — which resolves to
+`src/lib.ts`. (`seo-agent/lib` is the same module under an explicit name, and
+`seo-agent/worker` exposes the Worker entry point for the rare host that wants it.)
 
 ```jsonc
 // your package.json
@@ -666,7 +668,7 @@ tag, and import the TypeScript source through the `./lib` export.
 ```
 
 ```ts
-import { resolveSiteConfig, claimRun, runPipeline, type AgentDeps } from 'seo-agent/lib';
+import { resolveSiteConfig, claimRun, runPipeline, type AgentDeps } from 'seo-agent';
 
 const config = resolveSiteConfig({ SITE_URL: 'https://example.com', SITE_NAME: 'Example', AI_MODEL: '@cf/meta/llama-3.1-8b-instruct' });
 const deps: AgentDeps = {

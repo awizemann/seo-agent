@@ -78,6 +78,11 @@ export default {
     // Everything else (REST + MCP) requires the bearer token.
     if (!(await authorized(request, env))) return json({ error: 'unauthorized' }, 401);
 
+    // MCP is dispatched OUTSIDE the REST try/catch: it owns its own protocol
+    // error envelope, and a protocol-level throw must surface as a Worker
+    // exception rather than being reshaped into a REST JSON 500.
+    if (pathname === '/mcp') return handleMcp(request, depsFromEnv(env), ctx);
+
     try {
       // The Worker→library boundary: build the dependency object ONCE per
       // request, after auth (AGENT_TOKEN stays an Env-only worker concern).
@@ -85,8 +90,6 @@ export default {
       // so a bad site profile (e.g. an unset SITE_URL) still answers with the
       // JSON error envelope rather than an unhandled Worker exception.
       const deps = depsFromEnv(env);
-
-      if (pathname === '/mcp') return handleMcp(request, deps, ctx);
 
       if (method === 'GET' && pathname === '/status') return json(await statusData(deps));
       // Fire-and-return: the pipeline (crawl + AI drafting) can run well past a
@@ -172,10 +175,11 @@ export default {
   // slow/variable Workers AI call is isolated to its own message. A throw
   // retries the message (up to max_retries); success/no-op acks it.
   async queue(batch, env): Promise<void> {
-    // One deps per queue event, shared by the (max_batch_size 1) messages in it.
-    const deps = depsFromEnv(env);
     for (const msg of batch.messages) {
       try {
+        // Built INSIDE the try so a bad site profile (e.g. an unset SITE_URL)
+        // hits the structured log + retry path instead of escaping the handler.
+        const deps = depsFromEnv(env);
         await draftAndCreate(deps, msg.body);
         msg.ack();
       } catch (err) {

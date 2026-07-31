@@ -113,3 +113,13 @@ describe('citation parsing parity', () => {
     expect(d(undefined)).toBe(1);
   });
 });
+
+describe('SITE_URL validation', () => {
+  it('throws a named domain error when SITE_URL is missing or unparseable', () => {
+    expect(() => resolveSiteConfig({})).toThrow('SITE_URL missing or invalid: ""');
+    expect(() => resolveSiteConfig({ SITE_URL: '' })).toThrow('SITE_URL missing or invalid: ""');
+    expect(() => resolveSiteConfig({ SITE_URL: 'example.com' })).toThrow(
+      'SITE_URL missing or invalid: "example.com"',
+    );
+  });
+});

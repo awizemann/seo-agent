@@ -69,7 +69,7 @@ export { analyticsSummary, analyticsPage, analyticsImpact } from './analytics.js
 
 // Drafting — the queue consumer half, and the validator the drafts must pass.
 export { draftAndCreate, invalidReason } from './propose.js';
-export type { DraftJob } from './propose.js';
+export type { DraftJob, DraftTrace } from './propose.js';
 
 // ---------------------------------------------------------------------------
 // Data types appearing in the signatures above, so consumers never need to

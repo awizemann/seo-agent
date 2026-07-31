@@ -75,7 +75,12 @@ export function clampCronDay(raw: string | undefined): number {
 /** Resolve a site profile from a plain var record. Pure — no Env, no I/O. */
 export function resolveSiteConfig(vars: Record<string, string | undefined>): SiteConfig {
   const siteUrl = vars.SITE_URL ?? '';
-  const host = new URL(siteUrl).hostname;
+  let host: string;
+  try {
+    host = new URL(siteUrl).hostname;
+  } catch {
+    throw new Error(`SITE_URL missing or invalid: "${siteUrl}"`);
+  }
   return {
     siteUrl,
     siteName: vars.SITE_NAME || host,
@@ -143,6 +148,3 @@ export function siteConfigFromEnv(env: Env): SiteConfig {
     CITATION_ANTHROPIC_MODEL: e.CITATION_ANTHROPIC_MODEL,
   });
 }
-
-/** Alias kept so existing callers compile unchanged. */
-export const siteConfig = siteConfigFromEnv;
