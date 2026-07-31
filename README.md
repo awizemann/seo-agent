@@ -354,7 +354,9 @@ crawlers don't run JavaScript. The telemetry tap records it at the edge instead:
   the `list_crawler_hits` MCP tool, and two low-noise findings —
   `ai_crawlers_silent` (tap active ≥14 days, zero AI-crawler hits) and
   `ai_crawler_errors` (a bot getting >20% errors on content responses —
-  html/lane/md serves only; asset fetches and their 404s don't count).
+  html/lane/md serves only, and only on pages the crawl knows from the sitemap;
+  asset fetches and vulnerability scanners spoofing bot UAs against junk paths
+  don't count).
 - Note: Google AI Mode clicks carry `noreferrer` and are invisible to referral
   telemetry everywhere, not just here.
 

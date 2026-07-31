@@ -84,8 +84,12 @@ export async function telemetryFindings(env: Env): Promise<Triggered[]> {
   // Content serves only (both numerator and denominator): the site tap also
   // records asset serves/404s/redirects as served='file', and a bot probing
   // missing static assets (apple-touch-icon.png…) must not read as "errors".
+  // KNOWN pages only: vulnerability scanners spoof AI-bot UAs to probe junk
+  // paths (/.git/…, /.ssh/config, /env) that fall through an SPA catch-all as
+  // 404 'html' serves — an error only counts on a path the crawl has seen in
+  // the sitemap (page_snapshots), with an .md twin normalized to its page.
   const errRows = await env.DB.prepare(
-    "SELECT bot, COUNT(*) AS n, SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS errs FROM aeo_hits WHERE kind = 'crawler' AND ts >= ? AND served IN ('html', 'lane', 'md') GROUP BY bot HAVING n >= 5"
+    "SELECT bot, COUNT(*) AS n, SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS errs FROM aeo_hits WHERE kind = 'crawler' AND ts >= ? AND served IN ('html', 'lane', 'md') AND (CASE WHEN path LIKE '%.md' THEN substr(path, 1, length(path) - 3) ELSE path END) IN (SELECT DISTINCT path FROM page_snapshots) GROUP BY bot HAVING n >= 5"
   )
     .bind(isoDaysAgo(7))
     .all<{ bot: string; n: number; errs: number }>();
