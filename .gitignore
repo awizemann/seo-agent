@@ -12,3 +12,10 @@ injector/wrangler.jsonc
 dist/
 *.log
 .DS_Store
+
+# Memophant app-local state (machine-specific, not for git)
+sessions/.raw/
+sessions/.index.json
+
+# Memophant — gitignored derived caches (code index, parser state).
+.memophant/
