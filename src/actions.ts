@@ -14,6 +14,7 @@ import { applyOverride, revertChange } from './overrides.js';
 import { telemetrySummary, telemetryFindings, pruneTelemetry, rollupTelemetryWeekly, listCrawlerHits as telemetryHits } from './telemetry.js';
 import { runCitationProbes, citationFindings, citationConfig, alreadyCheckedToday } from './citations.js';
 import { impactFindings } from './impact.js';
+import { depsFromEnv } from './deps.js';
 
 export class ApiError extends Error {
   constructor(
@@ -78,7 +79,10 @@ export async function startRun(env: Env, waitUntil: (p: Promise<unknown>) => voi
 }
 
 export async function runPipeline(env: Env, runId: number) {
-  const { snapshots } = await runCrawl(env, runId);
+  // Build the dependency object ONCE at this boundary; the sensing modules below
+  // take deps (or an explicit slice), never the Worker Env.
+  const deps = depsFromEnv(env);
+  const { snapshots } = await runCrawl(deps, runId);
   try {
     // Sense modules share the findings lifecycle but are isolated — a failure
     // in any of them degrades to zero findings from that sense, never a
@@ -91,12 +95,12 @@ export async function runPipeline(env: Env, runId: number) {
         console.error(JSON.stringify({ evt: `${name}_error`, error: err instanceof Error ? err.message : String(err) }));
       }
     };
-    await sense('aeo', () => aeoChecks(env, snapshots));
-    await sense('telemetry', () => telemetryFindings(env));
+    await sense('aeo', () => aeoChecks(deps.config, snapshots));
+    await sense('telemetry', () => telemetryFindings(deps.db));
     // Change-impact sense: computes any newly-computable d14/d28 verdicts from
     // GSC history (uses the previous run's ingest — GSC lags days regardless)
     // and surfaces hurt/helped changes. No-ops on GSC-off instances.
-    await sense('impact', () => impactFindings(env));
+    await sense('impact', () => impactFindings(deps));
 
     // Weekly citation probes ride the daily pipeline: on the configured UTC
     // weekday, probe once (idempotent per day, so a manual /run can't
@@ -126,22 +130,22 @@ export async function runPipeline(env: Env, runId: number) {
       // Write-once weekly rollups BEFORE the prune: a completed week is frozen
       // on the first run after it closes, long before the prune could touch it
       // (see rollupTelemetryWeekly for the eligibility guard).
-      await rollupTelemetryWeekly(env);
+      await rollupTelemetryWeekly(deps.db);
     } catch {
       // weekly rollup is best-effort
     }
     try {
-      await pruneTelemetry(env);
+      await pruneTelemetry(deps.db);
     } catch {
       // retention pruning is best-effort
     }
     try {
-      await prunePageSnapshots(env);
+      await prunePageSnapshots(deps.db);
     } catch {
       // retention pruning is best-effort
     }
 
-    const rules = await runRules(env, runId, snapshots, dedupeTriggered(extra));
+    const rules = await runRules(deps, runId, snapshots, dedupeTriggered(extra));
 
     // Drafting is off the critical path: enqueue one job per candidate and let
     // the queue consumer draft them one at a time. A failure here (or in a
@@ -156,7 +160,7 @@ export async function runPipeline(env: Env, runId: number) {
 
     let gsc;
     try {
-      gsc = await ingestGsc(env);
+      gsc = await ingestGsc(deps);
     } catch (err) {
       console.error(JSON.stringify({ evt: 'gsc_ingest_error', error: err instanceof Error ? err.message : String(err) }));
       gsc = { error: err instanceof Error ? err.message : String(err) };
@@ -195,7 +199,7 @@ export async function statusData(env: Env) {
     env.DB.prepare('SELECT COUNT(*) AS applied, SUM(CASE WHEN reverted_at IS NOT NULL THEN 1 ELSE 0 END) AS reverted FROM changes').first(),
     env.DB.prepare('SELECT COUNT(*) AS n, MAX(date) AS latest FROM gsc_daily').first(),
     isRunning(env),
-    telemetrySummary(env).catch(() => emptyTelemetry),
+    telemetrySummary(env.DB).catch(() => emptyTelemetry),
     env.DB.prepare(
       'SELECT MAX(checked_at) AS last, COUNT(*) AS total, SUM(cited) AS cited FROM citations WHERE checked_at = (SELECT MAX(checked_at) FROM citations)'
     )
@@ -230,7 +234,7 @@ export async function statusData(env: Env) {
 }
 
 export async function listAeoHits(env: Env, days = 7, limit = 200) {
-  return telemetryHits(env, days, limit);
+  return telemetryHits(env.DB, days, limit);
 }
 
 export async function listCitations(env: Env, limit = 200) {

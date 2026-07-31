@@ -1,0 +1,66 @@
+/**
+ * The agent's dependency object — everything the pipeline needs, as DATA rather
+ * than as the Worker `Env`. Modules take `AgentDeps` (or an explicit narrow
+ * slice of it) so a future host can hand them a D1-over-HTTP `db` and a site
+ * profile loaded from a database row instead of wrangler vars.
+ *
+ * SECRETS live here, on `secrets`, deliberately NOT on SiteConfig: config is
+ * data a multi-tenant host may store and render; secrets are not (see the note
+ * at the top of config.ts).
+ *
+ * There is no separate telemetry binding: the site's edge Worker binds THIS
+ * agent's D1 as its own `TELEMETRY` and writes `aeo_hits` rows into it, so on
+ * the agent side telemetry is just `deps.db`.
+ */
+
+import type { SiteConfig } from './config.js';
+import { siteConfigFromEnv } from './config.js';
+import type { DraftJob } from './propose.js';
+
+/** Optional API credentials. Absent/empty = that capability stays dormant. */
+export type AgentSecrets = {
+  /** Google service-account JSON; absent disables GSC ingest and the impact sense. */
+  gscServiceAccountJson?: string;
+  openaiApiKey?: string;
+  geminiApiKey?: string;
+  perplexityApiKey?: string;
+  anthropicApiKey?: string;
+};
+
+export type AgentDeps = {
+  db: D1Database;
+  overrides: KVNamespace;
+  draftQueue: Queue<DraftJob>;
+  ai: Ai;
+  config: SiteConfig;
+  secrets: AgentSecrets;
+};
+
+/**
+ * Worker adapter: map bindings, vars and secrets into AgentDeps. The API-key
+ * secrets are optional-cast because `wrangler types` only emits secrets present
+ * in the deployment, and every engine key is independently optional.
+ */
+export function depsFromEnv(env: Env): AgentDeps {
+  const e = env as Env & {
+    GSC_SERVICE_ACCOUNT_JSON?: string;
+    OPENAI_API_KEY?: string;
+    GEMINI_API_KEY?: string;
+    PERPLEXITY_API_KEY?: string;
+    ANTHROPIC_API_KEY?: string;
+  };
+  return {
+    db: env.DB,
+    overrides: env.OVERRIDES,
+    draftQueue: env.DRAFT_QUEUE as Queue<DraftJob>,
+    ai: env.AI,
+    config: siteConfigFromEnv(env),
+    secrets: {
+      gscServiceAccountJson: e.GSC_SERVICE_ACCOUNT_JSON,
+      openaiApiKey: e.OPENAI_API_KEY,
+      geminiApiKey: e.GEMINI_API_KEY,
+      perplexityApiKey: e.PERPLEXITY_API_KEY,
+      anthropicApiKey: e.ANTHROPIC_API_KEY,
+    },
+  };
+}

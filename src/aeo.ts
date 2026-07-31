@@ -29,7 +29,7 @@
 
 import type { PageSnapshot } from './crawl.js';
 import type { Triggered } from './rules.js';
-import { siteConfig } from './config.js';
+import type { SiteConfig } from './config.js';
 import { VERSION } from './version.js';
 
 // Answer-engine and user-request fetchers: robots-blocking any of these costs
@@ -211,8 +211,7 @@ async function fetchText(url: string, userAgent: string): Promise<Fetched> {
 
 const AGENT_UA = `seo-agent/${VERSION} (aeo-audit; +https://github.com/awizemann/seo-agent)`;
 
-export async function aeoChecks(env: Env, snapshots: PageSnapshot[]): Promise<Triggered[]> {
-  const cfg = siteConfig(env);
+export async function aeoChecks(cfg: SiteConfig, snapshots: PageSnapshot[]): Promise<Triggered[]> {
   if (!cfg.aeoChecks) return [];
   const origin = new URL(cfg.siteUrl).origin;
   const out: Triggered[] = [];

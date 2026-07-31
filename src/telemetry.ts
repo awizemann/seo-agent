@@ -22,15 +22,15 @@ export type TelemetrySummary = {
   md7d: number;
 };
 
-export async function telemetrySummary(env: Env): Promise<TelemetrySummary> {
+export async function telemetrySummary(db: D1Database): Promise<TelemetrySummary> {
   const since = isoDaysAgo(7);
   const [last, crawlers, referrals, md] = await Promise.all([
-    env.DB.prepare('SELECT MAX(ts) AS ts FROM aeo_hits').first<{ ts: string | null }>(),
-    env.DB.prepare("SELECT bot, COUNT(*) AS n FROM aeo_hits WHERE kind = 'crawler' AND ts >= ? GROUP BY bot ORDER BY n DESC")
+    db.prepare('SELECT MAX(ts) AS ts FROM aeo_hits').first<{ ts: string | null }>(),
+    db.prepare("SELECT bot, COUNT(*) AS n FROM aeo_hits WHERE kind = 'crawler' AND ts >= ? GROUP BY bot ORDER BY n DESC")
       .bind(since)
       .all<{ bot: string; n: number }>(),
-    env.DB.prepare("SELECT COUNT(*) AS n FROM aeo_hits WHERE kind = 'referral' AND ts >= ?").bind(since).first<{ n: number }>(),
-    env.DB.prepare("SELECT COUNT(*) AS n FROM aeo_hits WHERE served = 'md' AND ts >= ?").bind(since).first<{ n: number }>(),
+    db.prepare("SELECT COUNT(*) AS n FROM aeo_hits WHERE kind = 'referral' AND ts >= ?").bind(since).first<{ n: number }>(),
+    db.prepare("SELECT COUNT(*) AS n FROM aeo_hits WHERE served = 'md' AND ts >= ?").bind(since).first<{ n: number }>(),
   ]);
   return {
     active: !!last?.ts,
@@ -41,8 +41,8 @@ export async function telemetrySummary(env: Env): Promise<TelemetrySummary> {
   };
 }
 
-export async function listCrawlerHits(env: Env, days = 7, limit = 200) {
-  const rows = await env.DB.prepare(
+export async function listCrawlerHits(db: D1Database, days = 7, limit = 200) {
+  const rows = await db.prepare(
     'SELECT ts, kind, bot, referrer, path, status, served FROM aeo_hits WHERE ts >= ? ORDER BY id DESC LIMIT ?'
   )
     .bind(isoDaysAgo(Math.min(Math.max(days, 1), RETENTION_DAYS)), Math.min(Math.max(limit, 1), 500))
@@ -61,14 +61,14 @@ export async function listCrawlerHits(env: Env, days = 7, limit = 200) {
  *    files, asset 404s, redirects) are excluded from both sides of the ratio;
  *    bots probing for missing favicons/icons must not open findings.
  */
-export async function telemetryFindings(env: Env): Promise<Triggered[]> {
+export async function telemetryFindings(db: D1Database): Promise<Triggered[]> {
   const out: Triggered[] = [];
   const cutoff14 = isoDaysAgo(14);
 
-  const oldest = await env.DB.prepare('SELECT MIN(ts) AS ts FROM aeo_hits').first<{ ts: string | null }>();
+  const oldest = await db.prepare('SELECT MIN(ts) AS ts FROM aeo_hits').first<{ ts: string | null }>();
   if (!oldest?.ts) return out; // no tap wired up — nothing to say
   if (oldest.ts <= cutoff14) {
-    const recent = await env.DB.prepare("SELECT COUNT(*) AS n FROM aeo_hits WHERE kind = 'crawler' AND ts >= ?")
+    const recent = await db.prepare("SELECT COUNT(*) AS n FROM aeo_hits WHERE kind = 'crawler' AND ts >= ?")
       .bind(cutoff14)
       .first<{ n: number }>();
     if ((recent?.n ?? 0) === 0) {
@@ -88,7 +88,7 @@ export async function telemetryFindings(env: Env): Promise<Triggered[]> {
   // paths (/.git/…, /.ssh/config, /env) that fall through an SPA catch-all as
   // 404 'html' serves — an error only counts on a path the crawl has seen in
   // the sitemap (page_snapshots), with an .md twin normalized to its page.
-  const errRows = await env.DB.prepare(
+  const errRows = await db.prepare(
     "SELECT bot, COUNT(*) AS n, SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS errs FROM aeo_hits WHERE kind = 'crawler' AND ts >= ? AND served IN ('html', 'lane', 'md') AND (CASE WHEN path LIKE '%.md' THEN substr(path, 1, length(path) - 3) ELSE path END) IN (SELECT DISTINCT path FROM page_snapshots) GROUP BY bot HAVING n >= 5"
   )
     .bind(isoDaysAgo(7))
@@ -106,8 +106,8 @@ export async function telemetryFindings(env: Env): Promise<Triggered[]> {
   return out;
 }
 
-export async function pruneTelemetry(env: Env): Promise<void> {
-  await env.DB.prepare('DELETE FROM aeo_hits WHERE ts < ?').bind(isoDaysAgo(RETENTION_DAYS)).run();
+export async function pruneTelemetry(db: D1Database): Promise<void> {
+  await db.prepare('DELETE FROM aeo_hits WHERE ts < ?').bind(isoDaysAgo(RETENTION_DAYS)).run();
 }
 
 /**
@@ -152,9 +152,9 @@ export function eligibleWeeks(nowIso: string, weekStarts: string[], retentionDay
  * coalesce to '' (never NULL) so the UNIQUE key actually dedupes (SQLite
  * treats NULLs as distinct).
  */
-export async function rollupTelemetryWeekly(env: Env): Promise<void> {
+export async function rollupTelemetryWeekly(db: D1Database): Promise<void> {
   const rows = (
-    await env.DB.prepare('SELECT ts, kind, bot, served FROM aeo_hits').all<{
+    await db.prepare('SELECT ts, kind, bot, served FROM aeo_hits').all<{
       ts: string;
       kind: string;
       bot: string | null;
@@ -178,9 +178,9 @@ export async function rollupTelemetryWeekly(env: Env): Promise<void> {
   const entries = [...agg.values()].filter((a) => eligible.has(a.week_start));
   if (entries.length === 0) return;
 
-  const insert = env.DB.prepare('INSERT OR IGNORE INTO aeo_weekly (week_start, kind, bot, served, hits) VALUES (?, ?, ?, ?, ?)');
+  const insert = db.prepare('INSERT OR IGNORE INTO aeo_weekly (week_start, kind, bot, served, hits) VALUES (?, ?, ?, ?, ?)');
   const statements = entries.map((a) => insert.bind(a.week_start, a.kind, a.bot, a.served, a.hits));
   for (let i = 0; i < statements.length; i += 500) {
-    await env.DB.batch(statements.slice(i, i + 500));
+    await db.batch(statements.slice(i, i + 500));
   }
 }

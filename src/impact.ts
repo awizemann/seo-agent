@@ -15,7 +15,7 @@
  * the common one for low-traffic pages. Thresholds below are deliberately blunt.
  */
 
-import { siteConfig } from './config.js';
+import type { AgentDeps } from './deps.js';
 import { pageToPath, pageCandidates } from './pagepath.js';
 import type { Triggered } from './rules.js';
 
@@ -191,11 +191,11 @@ function metricsFor(rows: GscRow[], appliedDate: string, phase: Phase): ImpactMe
 type ChangeRow = { id: number; path: string; field: string; applied_at: string; reverted_at: string | null };
 
 /** Rows of gsc_daily for a path across a date range, matched via pageToPath. */
-async function fetchPathRows(env: Env, siteUrl: string, path: string, start: string, end: string): Promise<GscRow[]> {
+async function fetchPathRows(db: D1Database, siteUrl: string, path: string, start: string, end: string): Promise<GscRow[]> {
   const candidates = pageCandidates(path, siteUrl);
   const placeholders = candidates.map(() => '?').join(', ');
   const rows = (
-    await env.DB.prepare(
+    await db.prepare(
       `SELECT date, page, clicks, impressions, position FROM gsc_daily WHERE date >= ? AND date <= ? AND page IN (${placeholders})`
     )
       .bind(start, end, ...candidates)
@@ -212,21 +212,21 @@ async function fetchPathRows(env: Env, siteUrl: string, path: string, start: str
  * covers the phase's after-window end. Reverted changes get no NEW rows (any
  * existing rows stay); once a d28 row exists a change is frozen.
  */
-export async function computeImpacts(env: Env, siteUrl: string): Promise<number> {
-  const maxRow = await env.DB.prepare('SELECT MAX(date) AS d FROM gsc_daily').first<{ d: string | null }>();
+export async function computeImpacts(db: D1Database, siteUrl: string): Promise<number> {
+  const maxRow = await db.prepare('SELECT MAX(date) AS d FROM gsc_daily').first<{ d: string | null }>();
   const maxDate = maxRow?.d ?? null;
   if (!maxDate) return 0; // no GSC data — nothing computable
 
   const changes = (
-    await env.DB.prepare('SELECT id, path, field, applied_at, reverted_at FROM changes').all<ChangeRow>()
+    await db.prepare('SELECT id, path, field, applied_at, reverted_at FROM changes').all<ChangeRow>()
   ).results;
   const existing = new Set(
-    (await env.DB.prepare('SELECT change_id, phase FROM change_impact').all<{ change_id: number; phase: string }>()).results.map(
+    (await db.prepare('SELECT change_id, phase FROM change_impact').all<{ change_id: number; phase: string }>()).results.map(
       (r) => `${r.change_id}|${r.phase}`
     )
   );
 
-  const insert = env.DB.prepare(
+  const insert = db.prepare(
     `INSERT OR REPLACE INTO change_impact
        (change_id, phase, computed_at, before_clicks, after_clicks, before_impressions, after_impressions,
         before_ctr, after_ctr, before_position, after_position, verdict)
@@ -244,7 +244,7 @@ export async function computeImpacts(env: Env, siteUrl: string): Promise<number>
 
     // Fetch once over the widest window needed (d28 ⊇ d14), then compute each phase.
     const span = windowsFor(appliedDate, 'd28');
-    const rows = await fetchPathRows(env, siteUrl, c.path, span.beforeStart, span.afterEnd);
+    const rows = await fetchPathRows(db, siteUrl, c.path, span.beforeStart, span.afterEnd);
     for (const phase of need) {
       const m = metricsFor(rows, appliedDate, phase);
       const verdict = verdictFor(m);
@@ -267,7 +267,7 @@ export async function computeImpacts(env: Env, siteUrl: string): Promise<number>
     }
   }
 
-  if (statements.length > 0) await env.DB.batch(statements);
+  if (statements.length > 0) await db.batch(statements);
   if (statements.length > 0) console.log(JSON.stringify({ evt: 'impact_computed', rows: statements.length }));
   return statements.length;
 }
@@ -285,15 +285,15 @@ const pct = (before: number, after: number): string => {
  * change is reverted or the verdict moves off hurt/helped. GSC-off instances
  * return [] without touching change_impact.
  */
-export async function impactFindings(env: Env): Promise<Triggered[]> {
-  if (!env.GSC_SERVICE_ACCOUNT_JSON) return []; // GSC not configured (e.g. the eo instance)
+export async function impactFindings(deps: Pick<AgentDeps, 'db' | 'config' | 'secrets'>): Promise<Triggered[]> {
+  if (!deps.secrets.gscServiceAccountJson) return []; // GSC not configured (e.g. the eo instance)
 
-  const siteUrl = siteConfig(env).siteUrl;
-  await computeImpacts(env, siteUrl);
+  const siteUrl = deps.config.siteUrl;
+  await computeImpacts(deps.db, siteUrl);
 
   // Latest phase per change (d28 outranks d14), un-reverted only.
   const rows = (
-    await env.DB.prepare(
+    await deps.db.prepare(
       `WITH ranked AS (
          SELECT ci.change_id, ci.phase, ci.verdict, ci.before_ctr, ci.after_ctr, ci.before_position, ci.after_position,
                 ROW_NUMBER() OVER (

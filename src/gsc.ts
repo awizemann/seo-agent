@@ -5,7 +5,9 @@
  * lags ~2 days, so each run re-pulls a trailing window and upserts.
  */
 
-import { siteConfig } from './config.js';
+import type { AgentDeps } from './deps.js';
+
+type GscDeps = Pick<AgentDeps, 'db' | 'config' | 'secrets'>;
 
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const SCOPE = 'https://www.googleapis.com/auth/webmasters.readonly';
@@ -104,21 +106,21 @@ async function fetchRange(
   return { rows, calls };
 }
 
-async function upsertRows(env: Env, rows: Row[]): Promise<void> {
+async function upsertRows(db: D1Database, rows: Row[]): Promise<void> {
   if (rows.length === 0) return;
-  const upsert = env.DB.prepare(
+  const upsert = db.prepare(
     `INSERT OR REPLACE INTO gsc_daily (date, page, query, clicks, impressions, ctr, position) VALUES (?, ?, ?, ?, ?, ?, ?)`
   );
   // D1 batches are capped well above this chunk size; chunk to stay safe.
   for (let i = 0; i < rows.length; i += 500) {
-    await env.DB.batch(
+    await db.batch(
       rows.slice(i, i + 500).map((r) => upsert.bind(r.keys[0], r.keys[1], r.keys[2], r.clicks, r.impressions, r.ctr, r.position))
     );
   }
 }
 
 /** Fetch ~90 days of history in date-chunked, paged requests (capped). Idempotent. */
-async function backfillGsc(env: Env, token: string, endpoint: string): Promise<{ range: string; rows: number; calls: number }> {
+async function backfillGsc(db: D1Database, token: string, endpoint: string): Promise<{ range: string; rows: number; calls: number }> {
   const overallStart = isoDaysAgo(LAG_DAYS + BACKFILL_DAYS - 1);
   const overallEnd = isoDaysAgo(LAG_DAYS);
   let totalRows = 0;
@@ -128,7 +130,7 @@ async function backfillGsc(env: Env, token: string, endpoint: string): Promise<{
     const chunkEnd = proposedEnd < overallEnd ? proposedEnd : overallEnd;
     const { rows, calls: c } = await fetchRange(token, endpoint, chunkStart, chunkEnd);
     calls += c;
-    await upsertRows(env, rows);
+    await upsertRows(db, rows);
     totalRows += rows.length;
     if (calls >= MAX_BACKFILL_CALLS) {
       // Safety valve, unreachable at small-site volume (one call per 30-day
@@ -147,27 +149,28 @@ async function backfillGsc(env: Env, token: string, endpoint: string): Promise<{
 }
 
 export async function ingestGsc(
-  env: Env
+  deps: GscDeps
 ): Promise<{ skipped?: string; upserted?: number; window?: string; backfill?: { range: string; rows: number; calls: number } }> {
-  if (!env.GSC_SERVICE_ACCOUNT_JSON) return { skipped: 'GSC_SERVICE_ACCOUNT_JSON not configured' };
+  const serviceAccountJson = deps.secrets.gscServiceAccountJson;
+  if (!serviceAccountJson) return { skipped: 'GSC_SERVICE_ACCOUNT_JSON not configured' };
 
-  const sa = JSON.parse(env.GSC_SERVICE_ACCOUNT_JSON) as ServiceAccount;
+  const sa = JSON.parse(serviceAccountJson) as ServiceAccount;
   const token = await accessToken(sa);
   const startDate = isoDaysAgo(LAG_DAYS + WINDOW_DAYS - 1);
   const endDate = isoDaysAgo(LAG_DAYS);
-  const endpoint = `https://searchconsole.googleapis.com/webmasters/v3/sites/${encodeURIComponent(siteConfig(env).gscProperty)}/searchAnalytics/query`;
+  const endpoint = `https://searchconsole.googleapis.com/webmasters/v3/sites/${encodeURIComponent(deps.config.gscProperty)}/searchAnalytics/query`;
 
   const { rows } = await fetchRange(token, endpoint, startDate, endDate);
-  await upsertRows(env, rows);
+  await upsertRows(deps.db, rows);
   console.log(JSON.stringify({ evt: 'gsc_ingest_complete', window: `${startDate}..${endDate}`, rows: rows.length }));
 
   // Thin history → 90-day backfill (INSERT OR REPLACE, so overlap with the
   // trailing window above is harmless; see the trigger semantics on
   // BACKFILL_MIN_DATES above).
   let backfill: { range: string; rows: number; calls: number } | undefined;
-  const distinct = await env.DB.prepare('SELECT COUNT(DISTINCT date) AS n FROM gsc_daily').first<{ n: number }>();
+  const distinct = await deps.db.prepare('SELECT COUNT(DISTINCT date) AS n FROM gsc_daily').first<{ n: number }>();
   if ((distinct?.n ?? 0) < BACKFILL_MIN_DATES) {
-    backfill = await backfillGsc(env, token, endpoint);
+    backfill = await backfillGsc(deps.db, token, endpoint);
   }
 
   return { upserted: rows.length, window: `${startDate}..${endDate}`, ...(backfill ? { backfill } : {}) };
