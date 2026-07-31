@@ -7,13 +7,13 @@
 import { runCrawl, prunePageSnapshots } from './crawl.js';
 import { runRules, validateTitle, type Triggered } from './rules.js';
 import { aeoChecks } from './aeo.js';
-import { siteConfig } from './config.js';
 import { enqueueCandidates, draftWithTrace, PROPOSABLE_RULES } from './propose.js';
 import { ingestGsc } from './gsc.js';
 import { applyOverride, revertChange } from './overrides.js';
 import { telemetrySummary, telemetryFindings, pruneTelemetry, rollupTelemetryWeekly, listCrawlerHits as telemetryHits } from './telemetry.js';
 import { runCitationProbes, citationFindings, citationConfig, alreadyCheckedToday } from './citations.js';
 import { impactFindings } from './impact.js';
+import type { AgentDeps } from './deps.js';
 
 export class ApiError extends Error {
   constructor(
@@ -29,9 +29,9 @@ export class ApiError extends Error {
 // stops blocking new runs after 15 minutes instead of wedging forever.
 const IN_PROGRESS_WINDOW_MS = 15 * 60 * 1000;
 
-export async function isRunning(env: Env): Promise<boolean> {
+export async function isRunning(deps: Pick<AgentDeps, 'db'>): Promise<boolean> {
   const cutoff = new Date(Date.now() - IN_PROGRESS_WINDOW_MS).toISOString();
-  const row = await env.DB.prepare(
+  const row = await deps.db.prepare(
     'SELECT id FROM crawl_runs WHERE pipeline_done = 0 AND started_at > ? ORDER BY id DESC LIMIT 1'
   )
     .bind(cutoff)
@@ -45,10 +45,10 @@ export async function isRunning(env: Env): Promise<boolean> {
  * both win (a check-then-act race would). Returns the new run id, or null when
  * another run already holds the slot. The inserted row is what runCrawl fills in.
  */
-export async function claimRun(env: Env): Promise<number | null> {
+export async function claimRun(deps: Pick<AgentDeps, 'db'>): Promise<number | null> {
   const now = new Date().toISOString();
   const cutoff = new Date(Date.now() - IN_PROGRESS_WINDOW_MS).toISOString();
-  const res = await env.DB.prepare(
+  const res = await deps.db.prepare(
     `INSERT INTO crawl_runs (started_at, pipeline_done)
      SELECT ?1, 0
      WHERE NOT EXISTS (SELECT 1 FROM crawl_runs WHERE pipeline_done = 0 AND started_at > ?2)`
@@ -66,19 +66,19 @@ export async function claimRun(env: Env): Promise<number | null> {
  * second concurrent run (atomically, via claimRun — the button double-click /
  * cron overlap guard).
  */
-export async function startRun(env: Env, waitUntil: (p: Promise<unknown>) => void): Promise<{ started: boolean; running: boolean }> {
-  const runId = await claimRun(env);
+export async function startRun(deps: AgentDeps, waitUntil: (p: Promise<unknown>) => void): Promise<{ started: boolean; running: boolean }> {
+  const runId = await claimRun(deps);
   if (runId === null) return { started: false, running: true };
   waitUntil(
-    runPipeline(env, runId)
+    runPipeline(deps, runId)
       .then((r) => console.log(JSON.stringify({ evt: 'run_complete', ...r })))
       .catch((err) => console.error(JSON.stringify({ evt: 'run_error', error: err instanceof Error ? err.message : String(err) })))
   );
   return { started: true, running: true };
 }
 
-export async function runPipeline(env: Env, runId: number) {
-  const { snapshots } = await runCrawl(env, runId);
+export async function runPipeline(deps: AgentDeps, runId: number) {
+  const { snapshots } = await runCrawl(deps, runId);
   try {
     // Sense modules share the findings lifecycle but are isolated — a failure
     // in any of them degrades to zero findings from that sense, never a
@@ -91,12 +91,12 @@ export async function runPipeline(env: Env, runId: number) {
         console.error(JSON.stringify({ evt: `${name}_error`, error: err instanceof Error ? err.message : String(err) }));
       }
     };
-    await sense('aeo', () => aeoChecks(env, snapshots));
-    await sense('telemetry', () => telemetryFindings(env));
+    await sense('aeo', () => aeoChecks(deps.config, snapshots));
+    await sense('telemetry', () => telemetryFindings(deps.db));
     // Change-impact sense: computes any newly-computable d14/d28 verdicts from
     // GSC history (uses the previous run's ingest — GSC lags days regardless)
     // and surfaces hurt/helped changes. No-ops on GSC-off instances.
-    await sense('impact', () => impactFindings(env));
+    await sense('impact', () => impactFindings(deps));
 
     // Weekly citation probes ride the daily pipeline: on the configured UTC
     // weekday, probe once (idempotent per day, so a manual /run can't
@@ -109,10 +109,10 @@ export async function runPipeline(env: Env, runId: number) {
     let citations;
     let citationsSensed = false;
     try {
-      const { queries, engines, cronDay } = citationConfig(env);
-      if (queries.length > 0 && engines.length > 0 && new Date().getUTCDay() === cronDay && !(await alreadyCheckedToday(env))) {
-        citations = await runCitationProbes(env);
-        await sense('citations', () => citationFindings(env));
+      const { queries, engines, cronDay } = citationConfig(deps);
+      if (queries.length > 0 && engines.length > 0 && new Date().getUTCDay() === cronDay && !(await alreadyCheckedToday(deps))) {
+        citations = await runCitationProbes(deps);
+        await sense('citations', () => citationFindings(deps));
         citationsSensed = true;
       }
     } catch (err) {
@@ -120,35 +120,35 @@ export async function runPipeline(env: Env, runId: number) {
     }
     // Non-probe runs (and probe attempts that threw before sensing) fold the
     // current citation state in exactly once.
-    if (!citationsSensed) await sense('citations', () => citationFindings(env));
+    if (!citationsSensed) await sense('citations', () => citationFindings(deps));
 
     try {
       // Write-once weekly rollups BEFORE the prune: a completed week is frozen
       // on the first run after it closes, long before the prune could touch it
       // (see rollupTelemetryWeekly for the eligibility guard).
-      await rollupTelemetryWeekly(env);
+      await rollupTelemetryWeekly(deps.db);
     } catch {
       // weekly rollup is best-effort
     }
     try {
-      await pruneTelemetry(env);
+      await pruneTelemetry(deps.db);
     } catch {
       // retention pruning is best-effort
     }
     try {
-      await prunePageSnapshots(env);
+      await prunePageSnapshots(deps);
     } catch {
       // retention pruning is best-effort
     }
 
-    const rules = await runRules(env, runId, snapshots, dedupeTriggered(extra));
+    const rules = await runRules(deps, runId, snapshots, dedupeTriggered(extra));
 
     // Drafting is off the critical path: enqueue one job per candidate and let
     // the queue consumer draft them one at a time. A failure here (or in a
     // single draft later) can't discard the crawl+rules or stall the run.
     let proposals;
     try {
-      proposals = await enqueueCandidates(env, runId);
+      proposals = await enqueueCandidates(deps, runId);
     } catch (err) {
       console.error(JSON.stringify({ evt: 'enqueue_error', error: err instanceof Error ? err.message : String(err) }));
       proposals = { enqueued: 0, error: err instanceof Error ? err.message : String(err) };
@@ -156,7 +156,7 @@ export async function runPipeline(env: Env, runId: number) {
 
     let gsc;
     try {
-      gsc = await ingestGsc(env);
+      gsc = await ingestGsc(deps);
     } catch (err) {
       console.error(JSON.stringify({ evt: 'gsc_ingest_error', error: err instanceof Error ? err.message : String(err) }));
       gsc = { error: err instanceof Error ? err.message : String(err) };
@@ -165,7 +165,7 @@ export async function runPipeline(env: Env, runId: number) {
   } finally {
     // Mark the run finished whether the post-crawl stages succeeded or not, so
     // it stops reading as "in progress" the moment real work is done.
-    await env.DB.prepare('UPDATE crawl_runs SET pipeline_done = 1 WHERE id = ?').bind(runId).run();
+    await deps.db.prepare('UPDATE crawl_runs SET pipeline_done = 1 WHERE id = ?').bind(runId).run();
   }
 }
 
@@ -182,27 +182,28 @@ function dedupeTriggered(list: Triggered[]): Triggered[] {
   });
 }
 
-export async function statusData(env: Env) {
+export async function statusData(deps: Pick<AgentDeps, 'db' | 'config' | 'secrets'>) {
   // aeo_hits / citations were added in a later version; on a database upgraded
   // WITHOUT re-running db:init those tables don't exist and the sub-queries
   // throw. Degrade each to an inactive/empty block so /status still returns 200
   // (re-run `npm run db:init` — idempotent — to create them).
   const emptyTelemetry = { active: false, lastHit: null, crawler7d: [] as { bot: string; n: number }[], referral7d: 0, md7d: 0 };
   const [lastRun, findings, proposals, changes, gscRows, running, telemetry, latestCitations] = await Promise.all([
-    env.DB.prepare('SELECT id, started_at, finished_at, url_count, ok, pipeline_done FROM crawl_runs ORDER BY id DESC LIMIT 1').first(),
-    env.DB.prepare("SELECT severity, COUNT(*) AS n FROM findings WHERE status = 'open' GROUP BY severity").all(),
-    env.DB.prepare('SELECT status, COUNT(*) AS n FROM proposals GROUP BY status').all(),
-    env.DB.prepare('SELECT COUNT(*) AS applied, SUM(CASE WHEN reverted_at IS NOT NULL THEN 1 ELSE 0 END) AS reverted FROM changes').first(),
-    env.DB.prepare('SELECT COUNT(*) AS n, MAX(date) AS latest FROM gsc_daily').first(),
-    isRunning(env),
-    telemetrySummary(env).catch(() => emptyTelemetry),
-    env.DB.prepare(
+    deps.db.prepare('SELECT id, started_at, finished_at, url_count, ok, pipeline_done FROM crawl_runs ORDER BY id DESC LIMIT 1').first(),
+    deps.db.prepare("SELECT severity, COUNT(*) AS n FROM findings WHERE status = 'open' GROUP BY severity").all(),
+    deps.db.prepare('SELECT status, COUNT(*) AS n FROM proposals GROUP BY status').all(),
+    deps.db.prepare('SELECT COUNT(*) AS applied, SUM(CASE WHEN reverted_at IS NOT NULL THEN 1 ELSE 0 END) AS reverted FROM changes').first(),
+    deps.db.prepare('SELECT COUNT(*) AS n, MAX(date) AS latest FROM gsc_daily').first(),
+    isRunning(deps),
+    telemetrySummary(deps.db).catch(() => emptyTelemetry),
+    deps.db.prepare(
       'SELECT MAX(checked_at) AS last, COUNT(*) AS total, SUM(cited) AS cited FROM citations WHERE checked_at = (SELECT MAX(checked_at) FROM citations)'
     )
       .first<{ last: string | null; total: number; cited: number | null }>()
       .catch(() => null),
   ]);
-  const citCfg = citationConfig(env);
+  const citCfg = citationConfig(deps);
+  const cfg = deps.config;
   return {
     lastRun,
     running,
@@ -221,19 +222,19 @@ export async function statusData(env: Env) {
       },
     },
     config: {
-      autoApplyFields: env.AUTO_APPLY_FIELDS || '(none — approval required)',
-      model: env.AI_MODEL,
-      aeoChecks: siteConfig(env).aeoChecks,
+      autoApplyFields: cfg.autoApplyFields.join(',') || '(none — approval required)',
+      model: cfg.aiModel,
+      aeoChecks: cfg.aeoChecks,
     },
   };
 }
 
-export async function listAeoHits(env: Env, days = 7, limit = 200) {
-  return telemetryHits(env, days, limit);
+export async function listAeoHits(deps: Pick<AgentDeps, 'db'>, days = 7, limit = 200) {
+  return telemetryHits(deps.db, days, limit);
 }
 
-export async function listCitations(env: Env, limit = 200) {
-  const rows = await env.DB.prepare(
+export async function listCitations(deps: Pick<AgentDeps, 'db'>, limit = 200) {
+  const rows = await deps.db.prepare(
     'SELECT checked_at, engine, query, cited, rank, cited_url, total_sources, error FROM citations ORDER BY id DESC LIMIT ?'
   )
     .bind(Math.min(Math.max(limit, 1), 500))
@@ -241,8 +242,8 @@ export async function listCitations(env: Env, limit = 200) {
   return rows.results;
 }
 
-export async function runCitationCheck(env: Env) {
-  return runCitationProbes(env);
+export async function runCitationCheck(deps: Pick<AgentDeps, 'db' | 'config' | 'secrets'>) {
+  return runCitationProbes(deps);
 }
 
 // A finding's remediation state — where the fix stands — derived from its LATEST
@@ -268,9 +269,9 @@ export function remediationFor(p: { id: number; status: string } | undefined | n
   return null;
 }
 
-export async function listFindings(env: Env, status = 'open') {
+export async function listFindings(deps: Pick<AgentDeps, 'db'>, status = 'open') {
   const rows = (
-    await env.DB.prepare(
+    await deps.db.prepare(
       `SELECT id, created_at, path, rule, severity, detail, status FROM findings WHERE status = ?
        ORDER BY CASE severity
          WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 WHEN 'info' THEN 4 ELSE 5
@@ -287,7 +288,7 @@ export async function listFindings(env: Env, status = 'open') {
   // global and param-free rather than an IN-list over the (up to 500) findings.
   const latestByFinding = new Map<number, { id: number; status: string }>();
   const propRows = (
-    await env.DB.prepare(
+    await deps.db.prepare(
       `SELECT finding_id, id, status FROM proposals
        WHERE finding_id IS NOT NULL AND id IN (
          SELECT MAX(id) FROM proposals WHERE finding_id IS NOT NULL GROUP BY finding_id
@@ -302,7 +303,7 @@ export async function listFindings(env: Env, status = 'open') {
   const livePaths = new Set<string>();
   if (status === 'open') {
     const live = (
-      await env.DB.prepare("SELECT DISTINCT path FROM proposals WHERE field = 'description' AND status IN ('proposed', 'approved')").all<{
+      await deps.db.prepare("SELECT DISTINCT path FROM proposals WHERE field = 'description' AND status IN ('proposed', 'approved')").all<{
         path: string;
       }>()
     ).results;
@@ -339,14 +340,14 @@ export function findingTransitionError(
  * series at dismissal time. Unlike auto-resolve, the mute holds: runRules skips
  * re-opening a dismissed (path, rule) until it is restored.
  */
-export async function dismissFinding(env: Env, id: number) {
-  const f = await env.DB.prepare('SELECT id, status FROM findings WHERE id = ?').bind(id).first<{ id: number; status: string }>();
+export async function dismissFinding(deps: Pick<AgentDeps, 'db'>, id: number) {
+  const f = await deps.db.prepare('SELECT id, status FROM findings WHERE id = ?').bind(id).first<{ id: number; status: string }>();
   const err = findingTransitionError(f, 'dismiss');
   if (err) throw new ApiError(err.message, err.status);
   const now = new Date().toISOString();
   // The status guard in the UPDATE makes a double-click / race a no-op, not a
   // second stamp.
-  await env.DB.prepare("UPDATE findings SET status = 'dismissed', resolved_at = ? WHERE id = ? AND status = 'open'").bind(now, id).run();
+  await deps.db.prepare("UPDATE findings SET status = 'dismissed', resolved_at = ? WHERE id = ? AND status = 'open'").bind(now, id).run();
   console.log(JSON.stringify({ evt: 'finding_dismissed', id }));
   return { ok: true, id, status: 'dismissed' };
 }
@@ -356,12 +357,12 @@ export async function dismissFinding(env: Env, id: number) {
  * NOT re-open here — the next crawl re-opens it naturally if the condition still
  * holds, which keeps "open" meaning "currently triggering".
  */
-export async function restoreFinding(env: Env, id: number) {
-  const f = await env.DB.prepare('SELECT id, status FROM findings WHERE id = ?').bind(id).first<{ id: number; status: string }>();
+export async function restoreFinding(deps: Pick<AgentDeps, 'db'>, id: number) {
+  const f = await deps.db.prepare('SELECT id, status FROM findings WHERE id = ?').bind(id).first<{ id: number; status: string }>();
   const err = findingTransitionError(f, 'restore');
   if (err) throw new ApiError(err.message, err.status);
   const now = new Date().toISOString();
-  await env.DB.prepare("UPDATE findings SET status = 'resolved', resolved_at = ? WHERE id = ? AND status = 'dismissed'").bind(now, id).run();
+  await deps.db.prepare("UPDATE findings SET status = 'resolved', resolved_at = ? WHERE id = ? AND status = 'dismissed'").bind(now, id).run();
   console.log(JSON.stringify({ evt: 'finding_restored', id }));
   return { ok: true, id, status: 'resolved', note: 're-opens on the next crawl if the condition still holds' };
 }
@@ -373,30 +374,30 @@ export async function restoreFinding(env: Env, id: number) {
  * consumer's path-level idempotency, so this is a no-op when a live proposal
  * already exists.
  */
-export async function draftFinding(env: Env, id: number) {
-  const f = await env.DB.prepare('SELECT id, path, rule, status FROM findings WHERE id = ?')
+export async function draftFinding(deps: Pick<AgentDeps, 'db' | 'draftQueue'>, id: number) {
+  const f = await deps.db.prepare('SELECT id, path, rule, status FROM findings WHERE id = ?')
     .bind(id)
     .first<{ id: number; path: string; rule: string; status: string }>();
   if (!f) throw new ApiError('finding not found', 404);
   if (f.status !== 'open') throw new ApiError(`finding is ${f.status}, only open findings can be drafted`, 409);
   if (!PROPOSABLE_RULES.has(f.rule)) throw new ApiError(`rule ${f.rule} is not one the drafting pipeline can fix`, 400);
-  const existing = await env.DB.prepare(
+  const existing = await deps.db.prepare(
     "SELECT 1 FROM proposals WHERE path = ? AND field = 'description' AND status IN ('proposed', 'approved') LIMIT 1"
   )
     .bind(f.path)
     .first();
   if (existing) return { ok: true, enqueued: 0, note: 'a proposal for this page is already live' };
-  const snap = await env.DB.prepare('SELECT title, description FROM page_snapshots WHERE path = ? ORDER BY id DESC LIMIT 1')
+  const snap = await deps.db.prepare('SELECT title, description FROM page_snapshots WHERE path = ? ORDER BY id DESC LIMIT 1')
     .bind(f.path)
     .first<{ title: string | null; description: string | null }>();
   if (!snap) throw new ApiError('no snapshot for that path — run a crawl first', 404);
-  await env.DRAFT_QUEUE.send({ findingId: f.id, path: f.path, rule: f.rule, title: snap.title, current: snap.description });
+  await deps.draftQueue.send({ findingId: f.id, path: f.path, rule: f.rule, title: snap.title, current: snap.description });
   console.log(JSON.stringify({ evt: 'finding_draft_enqueued', id, path: f.path }));
   return { ok: true, enqueued: 1, note: 'draft queued — the proposal appears within ~1–2 min' };
 }
 
-export async function listProposals(env: Env, status = 'proposed') {
-  const rows = await env.DB.prepare(
+export async function listProposals(deps: Pick<AgentDeps, 'db'>, status = 'proposed') {
+  const rows = await deps.db.prepare(
     'SELECT id, created_at, path, field, current_value, proposed_value, rationale, model, status FROM proposals WHERE status = ? ORDER BY id LIMIT 200'
   )
     .bind(status)
@@ -404,8 +405,8 @@ export async function listProposals(env: Env, status = 'proposed') {
   return rows.results;
 }
 
-export async function decideProposal(env: Env, id: number, action: 'approve' | 'reject') {
-  const p = await env.DB.prepare("SELECT * FROM proposals WHERE id = ? AND status = 'proposed'").bind(id).first<{
+export async function decideProposal(deps: Pick<AgentDeps, 'db' | 'overrides'>, id: number, action: 'approve' | 'reject') {
+  const p = await deps.db.prepare("SELECT * FROM proposals WHERE id = ? AND status = 'proposed'").bind(id).first<{
     id: number;
     path: string;
     field: string;
@@ -415,10 +416,10 @@ export async function decideProposal(env: Env, id: number, action: 'approve' | '
   if (!p) throw new ApiError('proposal not found or already decided', 404);
   const now = new Date().toISOString();
   if (action === 'reject') {
-    await env.DB.prepare("UPDATE proposals SET status = 'rejected', decided_at = ? WHERE id = ?").bind(now, id).run();
+    await deps.db.prepare("UPDATE proposals SET status = 'rejected', decided_at = ? WHERE id = ?").bind(now, id).run();
     return { ok: true, id, status: 'rejected' };
   }
-  const changeId = await applyOverride(env, {
+  const changeId = await applyOverride(deps, {
     path: p.path,
     field: p.field,
     value: p.proposed_value,
@@ -426,12 +427,12 @@ export async function decideProposal(env: Env, id: number, action: 'approve' | '
     source: 'proposal',
     proposalId: p.id,
   });
-  await env.DB.prepare("UPDATE proposals SET status = 'approved', decided_at = ?, applied_at = ? WHERE id = ?").bind(now, now, id).run();
+  await deps.db.prepare("UPDATE proposals SET status = 'approved', decided_at = ?, applied_at = ? WHERE id = ?").bind(now, now, id).run();
   return { ok: true, id, status: 'approved', changeId, note: 'live within the KV cache TTL (~5 min)' };
 }
 
 export async function createProposal(
-  env: Env,
+  deps: Pick<AgentDeps, 'db'>,
   args: { path?: string; field?: string; value?: string; rationale?: string },
   validateDescription: (text: string) => string | null
 ) {
@@ -446,10 +447,10 @@ export async function createProposal(
     const reason = validateTitle(args.value);
     if (reason) throw new ApiError(`invalid title: ${reason}`, 400);
   }
-  const snap = await env.DB.prepare('SELECT title, description FROM page_snapshots WHERE path = ? ORDER BY id DESC LIMIT 1')
+  const snap = await deps.db.prepare('SELECT title, description FROM page_snapshots WHERE path = ? ORDER BY id DESC LIMIT 1')
     .bind(args.path)
     .first<{ title: string | null; description: string | null }>();
-  const row = await env.DB.prepare(
+  const row = await deps.db.prepare(
     `INSERT INTO proposals (created_at, path, field, current_value, proposed_value, rationale, model)
      VALUES (?, ?, ?, ?, ?, ?, 'manual') RETURNING id`
   )
@@ -465,27 +466,27 @@ export async function createProposal(
   return { ok: true, id: row?.id, status: 'proposed' };
 }
 
-export async function dryRunDraft(env: Env, path: string | undefined) {
+export async function dryRunDraft(deps: Pick<AgentDeps, 'db' | 'ai' | 'config'>, path: string | undefined) {
   if (!path) throw new ApiError('path required', 400);
-  const snap = await env.DB.prepare('SELECT title, description FROM page_snapshots WHERE path = ? ORDER BY id DESC LIMIT 1')
+  const snap = await deps.db.prepare('SELECT title, description FROM page_snapshots WHERE path = ? ORDER BY id DESC LIMIT 1')
     .bind(path)
     .first<{ title: string | null; description: string | null }>();
   if (!snap) throw new ApiError('no snapshot for that path — run a crawl first', 404);
-  return draftWithTrace(env, { path, title: snap.title, current: snap.description });
+  return draftWithTrace(deps, { path, title: snap.title, current: snap.description });
 }
 
-export async function listChanges(env: Env) {
-  const rows = await env.DB.prepare('SELECT * FROM changes ORDER BY id DESC LIMIT 200').all();
+export async function listChanges(deps: Pick<AgentDeps, 'db'>) {
+  const rows = await deps.db.prepare('SELECT * FROM changes ORDER BY id DESC LIMIT 200').all();
   return rows.results;
 }
 
-export async function revertById(env: Env, changeId: number) {
-  const result = await revertChange(env, changeId);
+export async function revertById(deps: Pick<AgentDeps, 'db' | 'overrides'>, changeId: number) {
+  const result = await revertChange(deps, changeId);
   if (!result.ok) throw new ApiError(result.error, result.status);
   return { ok: true };
 }
 
-export async function listOverrides(env: Env) {
-  const list = await env.OVERRIDES.list({ prefix: 'override:' });
-  return Promise.all(list.keys.map(async (k) => ({ key: k.name, value: await env.OVERRIDES.get(k.name) })));
+export async function listOverrides(deps: Pick<AgentDeps, 'overrides'>) {
+  const list = await deps.overrides.list({ prefix: 'override:' });
+  return Promise.all(list.keys.map(async (k) => ({ key: k.name, value: await deps.overrides.get(k.name) })));
 }

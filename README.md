@@ -646,3 +646,45 @@ default or is optional. See `wrangler.example.jsonc` for the annotated template.
   `max_tokens` generous (the code uses 2048) or `content` comes back empty.
 - Cost at 150 URLs/day: ~150 subrequests + ≤8 small AI drafts — effectively pennies
   per month on Workers paid.
+
+## Use as a library
+
+The Worker in `src/index.ts` is one consumer of this codebase, not the only one.
+`src/lib.ts` is the public entry point: a re-exports-only module carrying the site
+profile (`SiteConfig`), the dependency object (`AgentDeps`), the pipeline, and every
+listing/lifecycle function behind the API, MCP and dashboard. Nothing in it touches
+the Worker `Env` — you hand it your own D1, KV, Queue and Workers AI handles — so a
+host application (e.g. a multi-tenant control plane) can drive the agent per site
+with a profile loaded from a database row instead of from `wrangler.jsonc` vars.
+
+There's no build step and no npm publish: consume it as a git dependency pinned to a
+tag, and import the TypeScript source from the package root — which resolves to
+`src/lib.ts`. (`seo-agent/lib` is the same module under an explicit name, and
+`seo-agent/worker` exposes the Worker entry point for the rare host that wants it.)
+
+```jsonc
+// your package.json
+"dependencies": { "seo-agent": "github:awizemann/seo-agent#v1.8.0" }
+```
+
+```ts
+import { resolveSiteConfig, claimRun, runPipeline, type AgentDeps } from 'seo-agent';
+
+const config = resolveSiteConfig({ SITE_URL: 'https://example.com', SITE_NAME: 'Example', AI_MODEL: '@cf/meta/llama-3.1-8b-instruct' });
+const deps: AgentDeps = {
+  db: env.TENANT_DB,          // D1Database
+  overrides: env.TENANT_KV,   // KVNamespace
+  draftQueue: env.DRAFT_QUEUE, // Queue<DraftJob>
+  ai: env.AI,                 // Workers AI
+  config,
+  secrets: { gscServiceAccountJson: env.GSC_SERVICE_ACCOUNT_JSON },
+};
+const runId = await claimRun(deps);          // null when a run is already in flight
+if (runId !== null) await runPipeline(deps, runId);
+```
+
+**Stability promise.** The surface exported from `src/lib.ts` is semver-gated: it
+changes only on a minor or major version, and the tag you pin is immutable. Anything
+not exported there is internal and can change in any release — don't deep-import.
+Pipeline behavior lands in this repo first and is exercised by its test suite; a
+consuming host upgrades by moving its pin, deliberately.

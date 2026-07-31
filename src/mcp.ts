@@ -32,6 +32,7 @@ import { invalidReason } from './propose.js';
 import { analyticsSummary, analyticsImpact } from './analytics.js';
 import { VERDICT_METHODOLOGY } from './impact.js';
 import { VERSION } from './version.js';
+import type { AgentDeps } from './deps.js';
 
 const SUPPORTED_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 const LATEST_VERSION = '2025-06-18';
@@ -40,7 +41,7 @@ type Tool = {
   name: string;
   description: string;
   inputSchema: { type: 'object'; properties: Record<string, unknown>; required?: string[] };
-  handler: (env: Env, args: Record<string, any>, ctx: ExecutionContext) => Promise<unknown>;
+  handler: (deps: AgentDeps, args: Record<string, any>, ctx: ExecutionContext) => Promise<unknown>;
 };
 
 const TOOLS: Tool[] = [
@@ -49,14 +50,14 @@ const TOOLS: Tool[] = [
     description:
       'Overall state of the SEO agent: last crawl run, open findings by severity, proposals by status, applied-change counts, GSC data freshness, and active config.',
     inputSchema: { type: 'object', properties: {} },
-    handler: (env) => statusData(env),
+    handler: (deps) => statusData(deps),
   },
   {
     name: 'run_pipeline',
     description:
       'Start a pipeline run (sitemap self-crawl → rules → enqueue drafting jobs → GSC ingest) in the background and return immediately. Returns {started, running} — started=false means a run was already in progress. Poll seo_status until running=false and lastRun.pipeline_done=1 (usually well under a minute). Meta-description drafts are produced asynchronously by a queue over the following ~1–2 min, so call list_proposals a little after the run completes to see them.',
     inputSchema: { type: 'object', properties: {} },
-    handler: (env, _a, ctx) => startRun(env, (p) => ctx.waitUntil(p)),
+    handler: (deps, _a, ctx) => startRun(deps, (p) => ctx.waitUntil(p)),
   },
   {
     name: 'list_findings',
@@ -66,21 +67,21 @@ const TOOLS: Tool[] = [
       type: 'object',
       properties: { status: { type: 'string', enum: ['open', 'resolved', 'dismissed'], description: 'Default: open' } },
     },
-    handler: (env, a) => listFindings(env, a.status || 'open'),
+    handler: (deps, a) => listFindings(deps, a.status || 'open'),
   },
   {
     name: 'dismiss_finding',
     description:
       'Dismiss (mute) an open finding: it leaves the open list and — unlike auto-resolve — future crawls will not re-open the same (path, rule) until restore_finding. Use for a deliberate, permanent state (e.g. a page you removed on purpose). Errors 409 unless the finding is open, 404 if unknown.',
     inputSchema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] },
-    handler: (env, a) => dismissFinding(env, Number(a.id)),
+    handler: (deps, a) => dismissFinding(deps, Number(a.id)),
   },
   {
     name: 'restore_finding',
     description:
       'Restore a dismissed finding: lifts the mute (marks it resolved) so the next crawl re-opens it if the condition still holds. Errors 409 unless the finding is dismissed, 404 if unknown.',
     inputSchema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] },
-    handler: (env, a) => restoreFinding(env, Number(a.id)),
+    handler: (deps, a) => restoreFinding(deps, Number(a.id)),
   },
   {
     name: 'list_proposals',
@@ -91,20 +92,20 @@ const TOOLS: Tool[] = [
         status: { type: 'string', enum: ['proposed', 'approved', 'rejected', 'reverted'], description: 'Default: proposed' },
       },
     },
-    handler: (env, a) => listProposals(env, a.status || 'proposed'),
+    handler: (deps, a) => listProposals(deps, a.status || 'proposed'),
   },
   {
     name: 'approve_proposal',
     description:
       'Approve a proposal: applies it to the live site immediately via KV override (visible within ~5 min), journals the change, and returns the change id for revert.',
     inputSchema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] },
-    handler: (env, a) => decideProposal(env, Number(a.id), 'approve'),
+    handler: (deps, a) => decideProposal(deps, Number(a.id), 'approve'),
   },
   {
     name: 'reject_proposal',
     description: 'Reject a proposal. The page stays proposable on future runs.',
     inputSchema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] },
-    handler: (env, a) => decideProposal(env, Number(a.id), 'reject'),
+    handler: (deps, a) => decideProposal(deps, Number(a.id), 'reject'),
   },
   {
     name: 'create_proposal',
@@ -120,33 +121,33 @@ const TOOLS: Tool[] = [
       },
       required: ['path', 'value'],
     },
-    handler: (env, a) => createProposal(env, a, invalidReason),
+    handler: (deps, a) => createProposal(deps, a, invalidReason),
   },
   {
     name: 'dry_run_draft',
     description:
       'Generate one AI meta-description candidate for a page WITHOUT persisting anything. Returns the draft plus raw model output and validation verdicts. Call repeatedly for alternatives.',
     inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
-    handler: (env, a) => dryRunDraft(env, a.path),
+    handler: (deps, a) => dryRunDraft(deps, a.path),
   },
   {
     name: 'list_changes',
     description: 'The journal of every override applied to the live site (and reverts), newest first, with old/new values.',
     inputSchema: { type: 'object', properties: {} },
-    handler: (env) => listChanges(env),
+    handler: (deps) => listChanges(deps),
   },
   {
     name: 'revert_change',
     description:
       'Revert an applied change: removes the override so the site falls back to its baked value, and retires the source proposal so the page becomes proposable again.',
     inputSchema: { type: 'object', properties: { id: { type: 'number', description: 'The change id from list_changes' } }, required: ['id'] },
-    handler: (env, a) => revertById(env, Number(a.id)),
+    handler: (deps, a) => revertById(deps, Number(a.id)),
   },
   {
     name: 'list_overrides',
     description: 'The current live override state (what the edge injector is merging right now), straight from KV.',
     inputSchema: { type: 'object', properties: {} },
-    handler: (env) => listOverrides(env),
+    handler: (deps) => listOverrides(deps),
   },
   {
     name: 'list_crawler_hits',
@@ -156,28 +157,28 @@ const TOOLS: Tool[] = [
       type: 'object',
       properties: { days: { type: 'number', description: 'Look-back window in days (default 7, max 90)' } },
     },
-    handler: (env, a) => listAeoHits(env, Number(a.days) || 7),
+    handler: (deps, a) => listAeoHits(deps, Number(a.days) || 7),
   },
   {
     name: 'list_citations',
     description:
       'Citation-probe results, newest first: per engine × query, whether an AI answer engine cited this site (cited/rank/cited_url). Probes run weekly on CITATION_CRON_DAY or on demand via run_citation_check.',
     inputSchema: { type: 'object', properties: {} },
-    handler: (env) => listCitations(env),
+    handler: (deps) => listCitations(deps),
   },
   {
     name: 'run_citation_check',
     description:
       'Probe the configured AI engines (Gemini free-tier by default; Perplexity/OpenAI/Anthropic when their keys are set) with every CITATION_QUERIES query right now and record who cites the site. Returns {checked, cited, errors, engines} — or a `skipped` reason when queries/keys are not configured. Costs API quota on each call.',
     inputSchema: { type: 'object', properties: {} },
-    handler: (env) => runCitationCheck(env),
+    handler: (deps) => runCitationCheck(deps),
   },
   {
     name: 'get_analytics',
     description:
       'SEO/AEO metrics over time for the dashboard Analytics view: GSC clicks/impressions/CTR/position daily for 90d (all pages summed, active=false when GSC is off), AI-traffic daily counts (30d) + permanent weekly rollups + top AI bots (7d), citation-probe history, an open-findings-by-severity daily series (90d), and every applied change with its latest helped/hurt/neutral/insufficient_data verdict.',
     inputSchema: { type: 'object', properties: {} },
-    handler: (env) => analyticsSummary(env),
+    handler: (deps) => analyticsSummary(deps),
   },
   {
     name: 'get_change_impact',
@@ -187,8 +188,8 @@ const TOOLS: Tool[] = [
       type: 'object',
       properties: { change_id: { type: 'number', description: 'Optional — limit to one change from list_changes' } },
     },
-    handler: async (env, a) => {
-      const rows = (await analyticsImpact(env)) as { change_id: number }[];
+    handler: async (deps, a) => {
+      const rows = (await analyticsImpact(deps)) as { change_id: number }[];
       const filtered = a.change_id != null ? rows.filter((r) => r.change_id === Number(a.change_id)) : rows;
       return { rows: filtered, methodology: VERDICT_METHODOLOGY };
     },
@@ -201,7 +202,7 @@ const rpcResult = (id: unknown, result: unknown): Response =>
 const rpcError = (id: unknown, code: number, message: string, status = 200): Response =>
   Response.json({ jsonrpc: '2.0', id: id ?? null, error: { code, message } }, { status });
 
-export async function handleMcp(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+export async function handleMcp(request: Request, deps: AgentDeps, ctx: ExecutionContext): Promise<Response> {
   // DNS-rebinding protection (spec MUST): browser-originated cross-site
   // requests carry an Origin header; API clients (Claude Code, curl) do not.
   const origin = request.headers.get('origin');
@@ -262,7 +263,7 @@ export async function handleMcp(request: Request, env: Env, ctx: ExecutionContex
         const tool = TOOLS.find((t) => t.name === params?.name);
         if (!tool) return rpcError(id, -32602, `Unknown tool: ${params?.name}`);
         try {
-          const result = await tool.handler(env, params?.arguments ?? {}, ctx);
+          const result = await tool.handler(deps, params?.arguments ?? {}, ctx);
           return rpcResult(id, { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] });
         } catch (err) {
           // Tool-level failures are results with isError, not protocol errors.

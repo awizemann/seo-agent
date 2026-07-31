@@ -7,7 +7,7 @@
  */
 
 import type { PageSnapshot } from './crawl.js';
-import { siteConfig } from './config.js';
+import type { AgentDeps } from './deps.js';
 
 export type Triggered = { path: string; rule: string; severity: string; detail: string };
 
@@ -71,14 +71,14 @@ export function mutedKeys(rows: { id: number; path: string; rule: string; status
 }
 
 export async function runRules(
-  env: Env,
+  deps: Pick<AgentDeps, 'db' | 'config'>,
   runId: number,
   snapshots: PageSnapshot[],
   // Findings from other check modules (e.g. aeo.ts) that share the same
   // (path, rule) open/auto-resolve lifecycle and land in the same upsert.
   extraTriggered: Triggered[] = []
 ): Promise<{ opened: number; resolved: number; open: number }> {
-  const cfg = siteConfig(env);
+  const cfg = deps.config;
   const siteOrigin = new URL(cfg.siteUrl).origin;
   const triggered: Triggered[] = [...extraTriggered];
   const add = (path: string, rule: string, severity: string, detail: string) =>
@@ -155,12 +155,12 @@ export async function runRules(
   }
 
   // New/removed pages vs the previous successful run (first run = baseline, no events).
-  const prev = await env.DB.prepare('SELECT id FROM crawl_runs WHERE id < ? AND ok = 1 ORDER BY id DESC LIMIT 1')
+  const prev = await deps.db.prepare('SELECT id FROM crawl_runs WHERE id < ? AND ok = 1 ORDER BY id DESC LIMIT 1')
     .bind(runId)
     .first<{ id: number }>();
   if (prev) {
     const prevPaths = new Set(
-      (await env.DB.prepare('SELECT path FROM page_snapshots WHERE run_id = ?').bind(prev.id).all<{ path: string }>()).results.map(
+      (await deps.db.prepare('SELECT path FROM page_snapshots WHERE run_id = ?').bind(prev.id).all<{ path: string }>()).results.map(
         (r) => r.path
       )
     );
@@ -175,7 +175,7 @@ export async function runRules(
 
   // Upsert against open findings: open the new, resolve the cleared.
   const openRows = (
-    await env.DB.prepare("SELECT id, path, rule FROM findings WHERE status = 'open'").all<{ id: number; path: string; rule: string }>()
+    await deps.db.prepare("SELECT id, path, rule FROM findings WHERE status = 'open'").all<{ id: number; path: string; rule: string }>()
   ).results;
   const openKeys = new Map(openRows.map((r) => [keyOf(r.path, r.rule), r.id]));
   // Muted keys: a (path, rule) a human dismissed. Skip inserting its triggered
@@ -184,7 +184,7 @@ export async function runRules(
   // 'dismissed' (a restore turns that row 'resolved', lifting the mute). The
   // resolve loop below only walks openKeys, so it never touches dismissed rows.
   const latestPerKey = (
-    await env.DB.prepare(
+    await deps.db.prepare(
       `SELECT f.id AS id, f.path AS path, f.rule AS rule, f.status AS status
        FROM findings f
        JOIN (SELECT path, rule, MAX(id) AS mid FROM findings GROUP BY path, rule) m
@@ -206,7 +206,7 @@ export async function runRules(
 
   const now = new Date().toISOString();
   const statements = [];
-  const insert = env.DB.prepare('INSERT INTO findings (created_at, run_id, path, rule, severity, detail) VALUES (?, ?, ?, ?, ?, ?)');
+  const insert = deps.db.prepare('INSERT INTO findings (created_at, run_id, path, rule, severity, detail) VALUES (?, ?, ?, ?, ?, ?)');
   let opened = 0;
   for (const t of uniqueTriggered) {
     const k = keyOf(t.path, t.rule);
@@ -215,7 +215,7 @@ export async function runRules(
     statements.push(insert.bind(now, runId, t.path, t.rule, t.severity, t.detail));
     opened++;
   }
-  const resolve = env.DB.prepare("UPDATE findings SET status = 'resolved', resolved_at = ? WHERE id = ?");
+  const resolve = deps.db.prepare("UPDATE findings SET status = 'resolved', resolved_at = ? WHERE id = ?");
   let resolved = 0;
   for (const [key, id] of openKeys) {
     if (!triggeredKeys.has(key)) {
@@ -223,7 +223,7 @@ export async function runRules(
       resolved++;
     }
   }
-  if (statements.length > 0) await env.DB.batch(statements);
+  if (statements.length > 0) await deps.db.batch(statements);
 
   console.log(JSON.stringify({ evt: 'rules_complete', runId, opened, resolved, open: triggeredKeys.size }));
   return { opened, resolved, open: triggeredKeys.size };

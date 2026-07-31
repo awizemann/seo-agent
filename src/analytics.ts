@@ -9,6 +9,7 @@
  * the endpoints still return 200 (statusData does the same for aeo/citations).
  */
 
+import type { AgentDeps } from './deps.js';
 import { pageToPath, pageCandidates } from './pagepath.js';
 import { addDays } from './impact.js';
 import { citationConfig } from './citations.js';
@@ -51,11 +52,12 @@ export function openFindingsSeries(rows: FindingRow[], days: number): OpenFindin
 }
 
 /** A single path's GSC daily series (impression-weighted ctr/position). */
-async function gscDailyForPath(env: Env, path: string, sinceDate: string) {
-  const candidates = pageCandidates(path, env.SITE_URL);
+async function gscDailyForPath(deps: Pick<AgentDeps, 'db' | 'config'>, path: string, sinceDate: string) {
+  const siteUrl = deps.config.siteUrl;
+  const candidates = pageCandidates(path, siteUrl);
   const placeholders = candidates.map(() => '?').join(', ');
   const rows = (
-    await env.DB.prepare(
+    await deps.db.prepare(
       `SELECT date, page, clicks, impressions, position FROM gsc_daily WHERE date >= ? AND page IN (${placeholders})`
     )
       .bind(sinceDate, ...candidates)
@@ -63,7 +65,7 @@ async function gscDailyForPath(env: Env, path: string, sinceDate: string) {
   ).results;
   const byDate = new Map<string, { clicks: number; impressions: number; posWeighted: number }>();
   for (const r of rows) {
-    if (pageToPath(r.page, env.SITE_URL) !== path) continue;
+    if (pageToPath(r.page, siteUrl) !== path) continue;
     const cur = byDate.get(r.date) ?? { clicks: 0, impressions: 0, posWeighted: 0 };
     cur.clicks += r.clicks;
     cur.impressions += r.impressions;
@@ -82,7 +84,7 @@ async function gscDailyForPath(env: Env, path: string, sinceDate: string) {
 }
 
 /** GET /analytics/summary — the whole dashboard payload. */
-export async function analyticsSummary(env: Env) {
+export async function analyticsSummary(deps: Pick<AgentDeps, 'db' | 'config' | 'secrets'>) {
   // Shared 90-day date bound (YYYY-MM-DD): the GSC daily window and the SQL
   // pre-filter for the findings series (one day more generous than the series'
   // earliest charted day — safe, never excludes a row that could count).
@@ -90,7 +92,7 @@ export async function analyticsSummary(env: Env) {
   const aeoSince = isoDaysAgo(30);
 
   const [gscDaily, gscActive] = await Promise.all([
-    env.DB.prepare(
+    deps.db.prepare(
       `SELECT date, SUM(clicks) AS clicks, SUM(impressions) AS impressions,
               CASE WHEN SUM(impressions) > 0 THEN CAST(SUM(clicks) AS REAL) / SUM(impressions) ELSE 0 END AS ctr,
               CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions) / SUM(impressions) ELSE 0 END AS position
@@ -100,14 +102,14 @@ export async function analyticsSummary(env: Env) {
       .all<{ date: string; clicks: number; impressions: number; ctr: number; position: number }>()
       .then((r) => r.results)
       .catch(() => []),
-    env.DB.prepare('SELECT COUNT(*) AS n FROM gsc_daily')
+    deps.db.prepare('SELECT COUNT(*) AS n FROM gsc_daily')
       .first<{ n: number }>()
       .then((r) => (r?.n ?? 0) > 0)
       .catch(() => false),
   ]);
 
   const [aeoDaily, aeoWeekly, topBots] = await Promise.all([
-    env.DB.prepare(
+    deps.db.prepare(
       `SELECT substr(ts, 1, 10) AS date,
               SUM(CASE WHEN kind = 'crawler' THEN 1 ELSE 0 END) AS crawler,
               SUM(CASE WHEN kind = 'referral' THEN 1 ELSE 0 END) AS referral,
@@ -118,11 +120,11 @@ export async function analyticsSummary(env: Env) {
       .all<{ date: string; crawler: number; referral: number; agent: number }>()
       .then((r) => r.results)
       .catch(() => []),
-    env.DB.prepare('SELECT week_start, kind, bot, served, hits FROM aeo_weekly ORDER BY week_start, kind, bot, served')
+    deps.db.prepare('SELECT week_start, kind, bot, served, hits FROM aeo_weekly ORDER BY week_start, kind, bot, served')
       .all<{ week_start: string; kind: string; bot: string | null; served: string; hits: number }>()
       .then((r) => r.results)
       .catch(() => []),
-    env.DB.prepare(
+    deps.db.prepare(
       "SELECT bot, COUNT(*) AS hits FROM aeo_hits WHERE kind = 'crawler' AND bot IS NOT NULL AND ts >= ? GROUP BY bot ORDER BY hits DESC LIMIT 10"
     )
       .bind(isoDaysAgo(7))
@@ -135,14 +137,14 @@ export async function analyticsSummary(env: Env) {
   // cadence — then reversed to ascending, so a years-old install can't balloon
   // the summary payload.
   const citSeries = (
-    await env.DB.prepare(
+    await deps.db.prepare(
       'SELECT checked_at, engine, query, cited, rank FROM citations ORDER BY checked_at DESC, id DESC LIMIT 4000'
     )
       .all<{ checked_at: string; engine: string; query: string; cited: number; rank: number | null }>()
       .then((r) => r.results)
       .catch(() => [])
   ).reverse();
-  const citCfg = citationConfig(env);
+  const citCfg = citationConfig(deps);
   const citationsActive = citSeries.length > 0 || (citCfg.queries.length > 0 && citCfg.engines.length > 0);
 
   // Bounded: a finding resolved before the 90-day window opened is closed on
@@ -150,7 +152,7 @@ export async function analyticsSummary(env: Env) {
   // resolve day onward), so it can never affect the series — exclude such rows
   // in SQL and the table can grow for years without ballooning this read.
   // Unresolved rows always load: they are open regardless of age.
-  const findingRows = await env.DB.prepare(
+  const findingRows = await deps.db.prepare(
     'SELECT created_at, resolved_at, severity FROM findings WHERE resolved_at IS NULL OR resolved_at >= ?'
   )
     .bind(since90)
@@ -158,7 +160,7 @@ export async function analyticsSummary(env: Env) {
     .then((r) => r.results)
     .catch(() => [] as FindingRow[]);
 
-  const changes = await changesWithVerdict(env);
+  const changes = await changesWithVerdict(deps);
 
   return {
     gsc: { active: gscActive, daily: gscDaily },
@@ -170,13 +172,13 @@ export async function analyticsSummary(env: Env) {
 }
 
 /** Changes with their latest-phase verdict merged in (d28 outranks d14). */
-async function changesWithVerdict(env: Env) {
+async function changesWithVerdict(deps: Pick<AgentDeps, 'db'>) {
   const changes = (
-    await env.DB.prepare('SELECT id, path, field, applied_at, reverted_at FROM changes ORDER BY id DESC')
+    await deps.db.prepare('SELECT id, path, field, applied_at, reverted_at FROM changes ORDER BY id DESC')
       .all<{ id: number; path: string; field: string; applied_at: string; reverted_at: string | null }>()
   ).results;
 
-  const impactRows = await env.DB.prepare('SELECT change_id, phase, verdict FROM change_impact')
+  const impactRows = await deps.db.prepare('SELECT change_id, phase, verdict FROM change_impact')
     .all<{ change_id: number; phase: string; verdict: string }>()
     .then((r) => r.results)
     .catch(() => [] as { change_id: number; phase: string; verdict: string }[]);
@@ -195,14 +197,14 @@ async function changesWithVerdict(env: Env) {
 }
 
 /** GET /analytics/page?path=/x — one page's GSC series, changes + impact, AI hits. */
-export async function analyticsPage(env: Env, path: string) {
+export async function analyticsPage(deps: Pick<AgentDeps, 'db' | 'config'>, path: string) {
   if (!path) return { error: 'path required' };
-  const p = pageToPath(path, env.SITE_URL);
+  const p = pageToPath(path, deps.config.siteUrl);
 
-  const gsc = await gscDailyForPath(env, p, dateDaysAgo(90)).catch(() => []);
+  const gsc = await gscDailyForPath(deps, p, dateDaysAgo(90)).catch(() => []);
 
   const changes = (
-    await env.DB.prepare('SELECT id, path, field, applied_at, reverted_at, old_value, new_value, source FROM changes WHERE path = ? ORDER BY id DESC')
+    await deps.db.prepare('SELECT id, path, field, applied_at, reverted_at, old_value, new_value, source FROM changes WHERE path = ? ORDER BY id DESC')
       .bind(p)
       .all<{ id: number; path: string; field: string; applied_at: string; reverted_at: string | null; old_value: string | null; new_value: string; source: string }>()
   ).results;
@@ -210,7 +212,7 @@ export async function analyticsPage(env: Env, path: string) {
   if (changes.length > 0) {
     const ids = changes.map((c) => c.id);
     const placeholders = ids.map(() => '?').join(', ');
-    const impact = await env.DB.prepare(`SELECT * FROM change_impact WHERE change_id IN (${placeholders}) ORDER BY change_id, phase`)
+    const impact = await deps.db.prepare(`SELECT * FROM change_impact WHERE change_id IN (${placeholders}) ORDER BY change_id, phase`)
       .bind(...ids)
       .all<{ change_id: number }>()
       .then((r) => r.results)
@@ -222,7 +224,7 @@ export async function analyticsPage(env: Env, path: string) {
     }
   }
 
-  const aeoHits = await env.DB.prepare(
+  const aeoHits = await deps.db.prepare(
     "SELECT substr(ts, 1, 10) AS date, COUNT(*) AS count FROM aeo_hits WHERE path = ? AND ts >= ? GROUP BY date ORDER BY date"
   )
     .bind(p, isoDaysAgo(30))
@@ -239,8 +241,8 @@ export async function analyticsPage(env: Env, path: string) {
 }
 
 /** GET /analytics/impact — every change_impact row joined with its change. */
-export async function analyticsImpact(env: Env) {
-  return env.DB.prepare(
+export async function analyticsImpact(deps: Pick<AgentDeps, 'db'>) {
+  return deps.db.prepare(
     `SELECT ci.change_id, ci.phase, ci.computed_at,
             ci.before_clicks, ci.after_clicks, ci.before_impressions, ci.after_impressions,
             ci.before_ctr, ci.after_ctr, ci.before_position, ci.after_position, ci.verdict,

@@ -6,6 +6,7 @@
  * with no deploy event.
  */
 
+import type { AgentDeps } from './deps.js';
 import { VERSION } from './version.js';
 
 const USER_AGENT = `seo-agent/${VERSION} (self-audit; +https://github.com/awizemann/seo-agent)`;
@@ -147,8 +148,11 @@ async function fetchPage(entry: SitemapEntry): Promise<PageSnapshot> {
   return snap;
 }
 
-export async function runCrawl(env: Env, runId: number): Promise<{ runId: number; snapshots: PageSnapshot[] }> {
-  const origin = new URL(env.SITE_URL).origin;
+export async function runCrawl(
+  deps: Pick<AgentDeps, 'db' | 'config'>,
+  runId: number
+): Promise<{ runId: number; snapshots: PageSnapshot[] }> {
+  const origin = new URL(deps.config.siteUrl).origin;
   const sitemapRes = await fetch(`${origin}/sitemap.xml`, {
     headers: { 'user-agent': USER_AGENT },
     signal: AbortSignal.timeout(PAGE_TIMEOUT_MS),
@@ -188,7 +192,7 @@ export async function runCrawl(env: Env, runId: number): Promise<{ runId: number
   await Promise.all(workers);
 
   const fetchedAt = new Date().toISOString();
-  const insert = env.DB.prepare(
+  const insert = deps.db.prepare(
     `INSERT INTO page_snapshots
      (run_id, path, status, title, description, canonical, og_image, og_type, jsonld_types, noindex, lastmod, error, fetched_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -196,7 +200,7 @@ export async function runCrawl(env: Env, runId: number): Promise<{ runId: number
   // Chunk the batch — one DB.batch per SNAPSHOT_BATCH_SIZE statements (repo
   // convention; a single unbounded batch can exceed D1's per-batch limit).
   for (let i = 0; i < snapshots.length; i += SNAPSHOT_BATCH_SIZE) {
-    await env.DB.batch(
+    await deps.db.batch(
       snapshots.slice(i, i + SNAPSHOT_BATCH_SIZE).map((s) =>
         insert.bind(
           runId,
@@ -216,7 +220,7 @@ export async function runCrawl(env: Env, runId: number): Promise<{ runId: number
       )
     );
   }
-  await env.DB.prepare('UPDATE crawl_runs SET finished_at = ?, url_count = ?, ok = 1 WHERE id = ?')
+  await deps.db.prepare('UPDATE crawl_runs SET finished_at = ?, url_count = ?, ok = 1 WHERE id = ?')
     .bind(new Date().toISOString(), snapshots.length, runId)
     .run();
 
@@ -229,9 +233,9 @@ export async function runCrawl(env: Env, runId: number): Promise<{ runId: number
  * Rules only ever read the current run and the single previous ok run, so older
  * snapshots have no reader. The crawl_runs rows themselves are tiny and kept.
  */
-export async function prunePageSnapshots(env: Env): Promise<void> {
+export async function prunePageSnapshots(deps: Pick<AgentDeps, 'db'>): Promise<void> {
   const cutoff = new Date(Date.now() - SNAPSHOT_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
-  await env.DB.prepare('DELETE FROM page_snapshots WHERE run_id IN (SELECT id FROM crawl_runs WHERE started_at < ?)')
+  await deps.db.prepare('DELETE FROM page_snapshots WHERE run_id IN (SELECT id FROM crawl_runs WHERE started_at < ?)')
     .bind(cutoff)
     .run();
 }
