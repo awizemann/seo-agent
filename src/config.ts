@@ -35,6 +35,8 @@ export type SiteConfig = {
   autoApplyFields: string[];
   /** Search Console property (e.g. "sc-domain:example.com"). "" when GSC is not configured. */
   gscProperty: string;
+  /** Max sitemap URLs crawled per run, clamped to [1, 2000]. Unset/invalid = 2000 (the historical cap). */
+  pageCap: number;
   /** Citation-probe settings; engine enablement stays key-derived in citations.ts. */
   citations: {
     queries: string[];
@@ -99,6 +101,10 @@ export function resolveSiteConfig(vars: Record<string, string | undefined>): Sit
     maxProposalsPerRun: Math.max(0, parseInt(vars.MAX_PROPOSALS_PER_RUN ?? '', 10) || 0),
     autoApplyFields: (vars.AUTO_APPLY_FIELDS || '').split(',').map((f) => f.trim()).filter(Boolean),
     gscProperty: vars.GSC_PROPERTY || '',
+    pageCap: (() => {
+      const n = parseInt(vars.PAGE_CAP ?? '', 10);
+      return Number.isInteger(n) && n > 0 ? Math.min(n, 2000) : 2000;
+    })(),
     citations: {
       queries: parseQueries(vars.CITATION_QUERIES ?? ''),
       cronDay: clampCronDay(vars.CITATION_CRON_DAY),
@@ -111,21 +117,37 @@ export function resolveSiteConfig(vars: Record<string, string | undefined>): Sit
 }
 
 /**
- * Worker adapter: map Env vars into the plain record resolveSiteConfig wants.
- * Optional-cast so upgraded deployments whose wrangler.jsonc predates a var
- * still typecheck (wrangler types only emits vars present in the config).
+ * The vars the Worker adapter reads — STRUCTURAL, deliberately not the
+ * wrangler-generated `Env` global, so library consumers can call the adapters
+ * without that ambient type existing in their project. Everything is optional
+ * except SITE_URL (matching resolveSiteConfig's one hard requirement), which
+ * also keeps deployments whose wrangler.jsonc predates a var typechecking.
  */
-export function siteConfigFromEnv(env: Env): SiteConfig {
-  const e = env as Env & {
-    AEO_CHECKS?: string;
-    AEO_BOT_UA?: string;
-    CITATION_QUERIES?: string;
-    CITATION_CRON_DAY?: string;
-    CITATION_GEMINI_MODEL?: string;
-    CITATION_PERPLEXITY_MODEL?: string;
-    CITATION_OPENAI_MODEL?: string;
-    CITATION_ANTHROPIC_MODEL?: string;
-  };
+export type SiteVarEnv = {
+  SITE_URL: string;
+  SITE_NAME?: string;
+  SITE_DESCRIPTION?: string;
+  TITLE_BRAND_SUFFIX?: string;
+  SHELL_TITLE?: string;
+  ARTICLE_PATH_PREFIX?: string;
+  ARTICLE_API_TEMPLATE?: string;
+  AEO_CHECKS?: string;
+  AEO_BOT_UA?: string;
+  AI_MODEL?: string;
+  MAX_PROPOSALS_PER_RUN?: string;
+  AUTO_APPLY_FIELDS?: string;
+  GSC_PROPERTY?: string;
+  PAGE_CAP?: string;
+  CITATION_QUERIES?: string;
+  CITATION_CRON_DAY?: string;
+  CITATION_GEMINI_MODEL?: string;
+  CITATION_PERPLEXITY_MODEL?: string;
+  CITATION_OPENAI_MODEL?: string;
+  CITATION_ANTHROPIC_MODEL?: string;
+};
+
+/** Worker adapter: map Env vars into the plain record resolveSiteConfig wants. */
+export function siteConfigFromEnv(e: SiteVarEnv): SiteConfig {
   return resolveSiteConfig({
     SITE_URL: e.SITE_URL,
     SITE_NAME: e.SITE_NAME,
@@ -140,6 +162,7 @@ export function siteConfigFromEnv(env: Env): SiteConfig {
     MAX_PROPOSALS_PER_RUN: e.MAX_PROPOSALS_PER_RUN,
     AUTO_APPLY_FIELDS: e.AUTO_APPLY_FIELDS,
     GSC_PROPERTY: e.GSC_PROPERTY,
+    PAGE_CAP: e.PAGE_CAP,
     CITATION_QUERIES: e.CITATION_QUERIES,
     CITATION_CRON_DAY: e.CITATION_CRON_DAY,
     CITATION_GEMINI_MODEL: e.CITATION_GEMINI_MODEL,

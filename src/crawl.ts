@@ -178,8 +178,10 @@ export async function runCrawl(
     rawEntries = nested.flat();
   }
 
-  const { entries, truncated } = dedupeAndCap(rawEntries, MAX_TOTAL_ENTRIES);
-  if (truncated) console.log(JSON.stringify({ evt: 'sitemap_truncated', kept: entries.length, cap: MAX_TOTAL_ENTRIES }));
+  // config.pageCap is already clamped to [1, MAX_TOTAL_ENTRIES] at resolve time.
+  const cap = Math.min(deps.config.pageCap, MAX_TOTAL_ENTRIES);
+  const { entries, truncated } = dedupeAndCap(rawEntries, cap);
+  if (truncated) console.log(JSON.stringify({ evt: 'sitemap_truncated', kept: entries.length, cap }));
   if (entries.length === 0) throw new Error('sitemap parsed to zero URLs');
 
   const queue = [...entries];

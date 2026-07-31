@@ -59,6 +59,8 @@
     // Empty = every proposal requires explicit approval (recommended to start).
     "AUTO_APPLY_FIELDS": "",
     "MAX_PROPOSALS_PER_RUN": "8",
+    // Max sitemap URLs crawled per run, clamped to [1, 2000]. Unset = 2000.
+    "PAGE_CAP": "",
 
     // --- title heuristics (optional; leave "" to disable) ---
     // Brand suffix your injector appends to <title>, e.g. " | Example".

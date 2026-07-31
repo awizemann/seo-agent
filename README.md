@@ -664,7 +664,7 @@ tag, and import the TypeScript source from the package root — which resolves t
 
 ```jsonc
 // your package.json
-"dependencies": { "seo-agent": "github:awizemann/seo-agent#v1.8.0" }
+"dependencies": { "seo-agent": "github:awizemann/seo-agent#v1.9.0" }
 ```
 
 ```ts

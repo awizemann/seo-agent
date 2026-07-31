@@ -15,13 +15,13 @@
 // ---------------------------------------------------------------------------
 // Config — the site profile, as data.
 // ---------------------------------------------------------------------------
-export type { SiteConfig } from './config.js';
+export type { SiteConfig, SiteVarEnv } from './config.js';
 export { resolveSiteConfig, siteConfigFromEnv } from './config.js';
 
 // ---------------------------------------------------------------------------
 // Deps — bindings + config + secrets, as data.
 // ---------------------------------------------------------------------------
-export type { AgentDeps, AgentSecrets } from './deps.js';
+export type { AgentDeps, AgentSecrets, WorkerEnv } from './deps.js';
 export { depsFromEnv } from './deps.js';
 
 // ---------------------------------------------------------------------------

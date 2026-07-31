@@ -13,7 +13,7 @@
  * the agent side telemetry is just `deps.db`.
  */
 
-import type { SiteConfig } from './config.js';
+import type { SiteConfig, SiteVarEnv } from './config.js';
 import { siteConfigFromEnv } from './config.js';
 import type { DraftJob } from './propose.js';
 
@@ -37,24 +37,31 @@ export type AgentDeps = {
 };
 
 /**
- * Worker adapter: map bindings, vars and secrets into AgentDeps. The API-key
- * secrets are optional-cast because `wrangler types` only emits secrets present
- * in the deployment, and every engine key is independently optional.
+ * The bindings + vars + secrets the Worker adapter reads — STRUCTURAL, not the
+ * wrangler-generated `Env` global, so library consumers don't need that ambient
+ * type. Secrets are optional because `wrangler types` only emits secrets
+ * present in the deployment, and every engine key is independently optional.
  */
-export function depsFromEnv(env: Env): AgentDeps {
-  const e = env as Env & {
-    GSC_SERVICE_ACCOUNT_JSON?: string;
-    OPENAI_API_KEY?: string;
-    GEMINI_API_KEY?: string;
-    PERPLEXITY_API_KEY?: string;
-    ANTHROPIC_API_KEY?: string;
-  };
+export type WorkerEnv = SiteVarEnv & {
+  DB: D1Database;
+  OVERRIDES: KVNamespace;
+  DRAFT_QUEUE: Queue;
+  AI: Ai;
+  GSC_SERVICE_ACCOUNT_JSON?: string;
+  OPENAI_API_KEY?: string;
+  GEMINI_API_KEY?: string;
+  PERPLEXITY_API_KEY?: string;
+  ANTHROPIC_API_KEY?: string;
+};
+
+/** Worker adapter: map bindings, vars and secrets into AgentDeps. */
+export function depsFromEnv(e: WorkerEnv): AgentDeps {
   return {
-    db: env.DB,
-    overrides: env.OVERRIDES,
-    draftQueue: env.DRAFT_QUEUE as Queue<DraftJob>,
-    ai: env.AI,
-    config: siteConfigFromEnv(env),
+    db: e.DB,
+    overrides: e.OVERRIDES,
+    draftQueue: e.DRAFT_QUEUE as Queue<DraftJob>,
+    ai: e.AI,
+    config: siteConfigFromEnv(e),
     secrets: {
       gscServiceAccountJson: e.GSC_SERVICE_ACCOUNT_JSON,
       openaiApiKey: e.OPENAI_API_KEY,

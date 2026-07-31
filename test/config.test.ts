@@ -123,3 +123,17 @@ describe('SITE_URL validation', () => {
     );
   });
 });
+
+describe('PAGE_CAP', () => {
+  it('defaults to 2000 and clamps to [1, 2000]', () => {
+    const base = { SITE_URL: 'https://example.com' };
+    expect(resolveSiteConfig(base).pageCap).toBe(2000);
+    expect(resolveSiteConfig({ ...base, PAGE_CAP: '' }).pageCap).toBe(2000);
+    expect(resolveSiteConfig({ ...base, PAGE_CAP: 'nope' }).pageCap).toBe(2000);
+    expect(resolveSiteConfig({ ...base, PAGE_CAP: '0' }).pageCap).toBe(2000);
+    expect(resolveSiteConfig({ ...base, PAGE_CAP: '-5' }).pageCap).toBe(2000);
+    expect(resolveSiteConfig({ ...base, PAGE_CAP: '100' }).pageCap).toBe(100);
+    expect(resolveSiteConfig({ ...base, PAGE_CAP: '1' }).pageCap).toBe(1);
+    expect(resolveSiteConfig({ ...base, PAGE_CAP: '99999' }).pageCap).toBe(2000);
+  });
+});
