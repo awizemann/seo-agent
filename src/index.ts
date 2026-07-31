@@ -31,6 +31,7 @@ import {
   runCitationCheck,
 } from './actions.js';
 import { invalidReason, draftAndCreate, type DraftJob } from './propose.js';
+import { depsFromEnv } from './deps.js';
 import { analyticsSummary, analyticsPage, analyticsImpact } from './analytics.js';
 import { handleMcp } from './mcp.js';
 import { DASHBOARD_HTML } from './dashboard.js';
@@ -77,74 +78,81 @@ export default {
     // Everything else (REST + MCP) requires the bearer token.
     if (!(await authorized(request, env))) return json({ error: 'unauthorized' }, 401);
 
-    if (pathname === '/mcp') return handleMcp(request, env, ctx);
-
     try {
-      if (method === 'GET' && pathname === '/status') return json(await statusData(env));
+      // The Worker→library boundary: build the dependency object ONCE per
+      // request, after auth (AGENT_TOKEN stays an Env-only worker concern).
+      // Everything below takes deps, never the Worker Env. Built INSIDE the try
+      // so a bad site profile (e.g. an unset SITE_URL) still answers with the
+      // JSON error envelope rather than an unhandled Worker exception.
+      const deps = depsFromEnv(env);
+
+      if (pathname === '/mcp') return handleMcp(request, deps, ctx);
+
+      if (method === 'GET' && pathname === '/status') return json(await statusData(deps));
       // Fire-and-return: the pipeline (crawl + AI drafting) can run well past a
       // normal request timeout, so start it in the background and let the client
       // poll /status for `running=false` + a new lastRun. 202 = started here,
       // 409 = a run was already in progress.
       if (method === 'POST' && pathname === '/run') {
-        const r = await startRun(env, (p) => ctx.waitUntil(p));
+        const r = await startRun(deps, (p) => ctx.waitUntil(p));
         return json(r, r.started ? 202 : 409);
       }
-      if (method === 'GET' && pathname === '/findings') return json(await listFindings(env, url.searchParams.get('status') || 'open'));
+      if (method === 'GET' && pathname === '/findings') return json(await listFindings(deps, url.searchParams.get('status') || 'open'));
 
       // Per-finding lifecycle actions: dismiss (mute) an open finding, restore a
       // dismissed one, or enqueue an AI draft for a description-fixable finding.
       const findingAction = pathname.match(/^\/findings\/(\d+)\/(dismiss|restore|draft)$/);
       if (method === 'POST' && findingAction) {
         const fid = parseInt(findingAction[1], 10);
-        if (findingAction[2] === 'dismiss') return json(await dismissFinding(env, fid));
-        if (findingAction[2] === 'restore') return json(await restoreFinding(env, fid));
-        return json(await draftFinding(env, fid));
+        if (findingAction[2] === 'dismiss') return json(await dismissFinding(deps, fid));
+        if (findingAction[2] === 'restore') return json(await restoreFinding(deps, fid));
+        return json(await draftFinding(deps, fid));
       }
 
-      if (method === 'GET' && pathname === '/proposals') return json(await listProposals(env, url.searchParams.get('status') || 'proposed'));
+      if (method === 'GET' && pathname === '/proposals') return json(await listProposals(deps, url.searchParams.get('status') || 'proposed'));
 
       // Manual proposal creation — e.g. promoting a dry-run winner. Goes
       // through the same validation, approval gate, and journal as AI drafts.
       if (method === 'POST' && pathname === '/proposals') {
         const body = await parseJsonBody<{ path?: string; field?: string; value?: string; rationale?: string }>(request);
-        return json(await createProposal(env, body, invalidReason));
+        return json(await createProposal(deps, body, invalidReason));
       }
 
       // Diagnostics: run the AI draft for one page and return raw output +
       // validation verdicts without persisting anything.
       if (method === 'POST' && pathname === '/proposals/dry-run') {
         const body = await parseJsonBody<{ path?: string }>(request);
-        return json(await dryRunDraft(env, body.path));
+        return json(await dryRunDraft(deps, body.path));
       }
 
       const proposalAction = pathname.match(/^\/proposals\/(\d+)\/(approve|reject)$/);
       if (method === 'POST' && proposalAction) {
-        return json(await decideProposal(env, parseInt(proposalAction[1], 10), proposalAction[2] as 'approve' | 'reject'));
+        return json(await decideProposal(deps, parseInt(proposalAction[1], 10), proposalAction[2] as 'approve' | 'reject'));
       }
 
-      if (method === 'GET' && pathname === '/changes') return json(await listChanges(env));
+      if (method === 'GET' && pathname === '/changes') return json(await listChanges(deps));
 
       const revertAction = pathname.match(/^\/changes\/(\d+)\/revert$/);
       if (method === 'POST' && revertAction) {
-        return json(await revertById(env, parseInt(revertAction[1], 10)));
+        return json(await revertById(deps, parseInt(revertAction[1], 10)));
       }
 
-      if (method === 'GET' && pathname === '/overrides') return json(await listOverrides(env));
+      if (method === 'GET' && pathname === '/overrides') return json(await listOverrides(deps));
 
       // AEO sensing: AI-traffic telemetry (written by the site's tap) and
       // citation-probe results/trigger.
       if (method === 'GET' && pathname === '/aeo/hits') {
-        return json(await listAeoHits(env, parseInt(url.searchParams.get('days') || '7', 10) || 7));
+        return json(await listAeoHits(deps, parseInt(url.searchParams.get('days') || '7', 10) || 7));
       }
-      if (method === 'GET' && pathname === '/aeo/citations') return json(await listCitations(env));
-      if (method === 'POST' && pathname === '/aeo/citations/run') return json(await runCitationCheck(env));
+      if (method === 'GET' && pathname === '/aeo/citations') return json(await listCitations(deps));
+      if (method === 'POST' && pathname === '/aeo/citations/run') return json(await runCitationCheck(deps));
 
       // Analytics: SEO/AEO metrics over time, change-impact verdicts. Read-only,
       // assembled in analytics.ts; each block degrades to empty on a DB that
       // predates the change_impact / aeo_weekly tables (never 500s).
-      if (method === 'GET' && pathname === '/analytics/summary') return json(await analyticsSummary(env));
-      if (method === 'GET' && pathname === '/analytics/page') return json(await analyticsPage(env, url.searchParams.get('path') || ''));
-      if (method === 'GET' && pathname === '/analytics/impact') return json(await analyticsImpact(env));
+      if (method === 'GET' && pathname === '/analytics/summary') return json(await analyticsSummary(deps));
+      if (method === 'GET' && pathname === '/analytics/page') return json(await analyticsPage(deps, url.searchParams.get('path') || ''));
+      if (method === 'GET' && pathname === '/analytics/impact') return json(await analyticsImpact(deps));
 
       return json({ error: 'not found' }, 404);
     } catch (err) {
@@ -157,16 +165,18 @@ export default {
 
   async scheduled(_controller, env, ctx): Promise<void> {
     // Same start path as the API: skips if a manual run is already in progress.
-    await startRun(env, (p) => ctx.waitUntil(p));
+    await startRun(depsFromEnv(env), (p) => ctx.waitUntil(p));
   },
 
   // Queue consumer (max_batch_size 1): draft one proposal per invocation, so a
   // slow/variable Workers AI call is isolated to its own message. A throw
   // retries the message (up to max_retries); success/no-op acks it.
   async queue(batch, env): Promise<void> {
+    // One deps per queue event, shared by the (max_batch_size 1) messages in it.
+    const deps = depsFromEnv(env);
     for (const msg of batch.messages) {
       try {
-        await draftAndCreate(env, msg.body);
+        await draftAndCreate(deps, msg.body);
         msg.ack();
       } catch (err) {
         console.error(JSON.stringify({ evt: 'draft_job_error', path: msg.body?.path, error: err instanceof Error ? err.message : String(err) }));

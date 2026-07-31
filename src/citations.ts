@@ -17,7 +17,8 @@
  * latest check) and citation_gained (newly cited, event-style).
  */
 
-import { siteConfig, type SiteConfig } from './config.js';
+import type { SiteConfig } from './config.js';
+import type { AgentDeps, AgentSecrets } from './deps.js';
 import type { Triggered } from './rules.js';
 
 // The var-derived citation settings now live in SiteConfig; these pure helpers
@@ -26,14 +27,8 @@ export { parseQueries, clampCronDay } from './config.js';
 
 export type CitationSource = { url?: string; domain?: string; title?: string };
 
-// Only the SECRETS stay on the env here — model ids and queries come from
-// SiteConfig, and engine enablement is still derived from key presence.
-type CitEnv = Env & {
-  GEMINI_API_KEY?: string;
-  PERPLEXITY_API_KEY?: string;
-  OPENAI_API_KEY?: string;
-  ANTHROPIC_API_KEY?: string;
-};
+// Model ids and queries come from SiteConfig; engine enablement is still
+// derived purely from KEY PRESENCE, now read off deps.secrets rather than Env.
 
 const PROBE_TIMEOUT_MS = 45_000;
 
@@ -128,19 +123,19 @@ async function post(url: string, headers: Record<string, string>, body: unknown)
 
 type EngineDef = {
   name: string;
-  enabled(env: CitEnv): boolean;
-  call(env: CitEnv, cfg: SiteConfig, query: string): Promise<CitationSource[]>;
+  enabled(secrets: AgentSecrets): boolean;
+  call(secrets: AgentSecrets, cfg: SiteConfig, query: string): Promise<CitationSource[]>;
 };
 
 const ENGINES: EngineDef[] = [
   {
     name: 'gemini',
-    enabled: (env) => !!env.GEMINI_API_KEY,
-    call: async (env, cfg, query) => {
+    enabled: (secrets) => !!secrets.geminiApiKey,
+    call: async (secrets, cfg, query) => {
       const model = cfg.citations.geminiModel;
       const data = await post(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-        { 'x-goog-api-key': env.GEMINI_API_KEY! },
+        { 'x-goog-api-key': secrets.geminiApiKey! },
         { contents: [{ role: 'user', parts: [{ text: query }] }], tools: [{ google_search: {} }] }
       );
       return extractGemini(data);
@@ -148,11 +143,11 @@ const ENGINES: EngineDef[] = [
   },
   {
     name: 'perplexity',
-    enabled: (env) => !!env.PERPLEXITY_API_KEY,
-    call: async (env, cfg, query) => {
+    enabled: (secrets) => !!secrets.perplexityApiKey,
+    call: async (secrets, cfg, query) => {
       const data = await post(
         'https://api.perplexity.ai/chat/completions',
-        { authorization: `Bearer ${env.PERPLEXITY_API_KEY}` },
+        { authorization: `Bearer ${secrets.perplexityApiKey}` },
         { model: cfg.citations.perplexityModel, messages: [{ role: 'user', content: query }] }
       );
       return extractPerplexity(data);
@@ -160,11 +155,11 @@ const ENGINES: EngineDef[] = [
   },
   {
     name: 'openai',
-    enabled: (env) => !!env.OPENAI_API_KEY,
-    call: async (env, cfg, query) => {
+    enabled: (secrets) => !!secrets.openaiApiKey,
+    call: async (secrets, cfg, query) => {
       const data = await post(
         'https://api.openai.com/v1/responses',
-        { authorization: `Bearer ${env.OPENAI_API_KEY}` },
+        { authorization: `Bearer ${secrets.openaiApiKey}` },
         { model: cfg.citations.openaiModel, input: query, tools: [{ type: 'web_search' }] }
       );
       return extractOpenAI(data);
@@ -172,11 +167,11 @@ const ENGINES: EngineDef[] = [
   },
   {
     name: 'anthropic',
-    enabled: (env) => !!env.ANTHROPIC_API_KEY,
-    call: async (env, cfg, query) => {
+    enabled: (secrets) => !!secrets.anthropicApiKey,
+    call: async (secrets, cfg, query) => {
       const data = await post(
         'https://api.anthropic.com/v1/messages',
-        { 'x-api-key': env.ANTHROPIC_API_KEY!, 'anthropic-version': '2023-06-01' },
+        { 'x-api-key': secrets.anthropicApiKey!, 'anthropic-version': '2023-06-01' },
         {
           model: cfg.citations.anthropicModel,
           max_tokens: 1024,
@@ -193,32 +188,31 @@ const ENGINES: EngineDef[] = [
 // The probe runner + findings
 // ---------------------------------------------------------------------------
 
-export function citationConfig(env: Env): { queries: string[]; engines: string[]; cronDay: number } {
-  const cfg = siteConfig(env);
+export function citationConfig(deps: Pick<AgentDeps, 'config' | 'secrets'>): { queries: string[]; engines: string[]; cronDay: number } {
+  const cfg = deps.config;
   return {
     queries: cfg.citations.queries,
-    engines: ENGINES.filter((x) => x.enabled(env as CitEnv)).map((x) => x.name),
+    engines: ENGINES.filter((x) => x.enabled(deps.secrets)).map((x) => x.name),
     cronDay: cfg.citations.cronDay,
   };
 }
 
-export async function alreadyCheckedToday(env: Env): Promise<boolean> {
+export async function alreadyCheckedToday(deps: Pick<AgentDeps, 'db'>): Promise<boolean> {
   const today = new Date().toISOString().slice(0, 10);
-  const row = await env.DB.prepare('SELECT 1 AS x FROM citations WHERE substr(checked_at, 1, 10) = ? LIMIT 1').bind(today).first();
+  const row = await deps.db.prepare('SELECT 1 AS x FROM citations WHERE substr(checked_at, 1, 10) = ? LIMIT 1').bind(today).first();
   return !!row;
 }
 
-export async function runCitationProbes(env: Env): Promise<{
+export async function runCitationProbes(deps: Pick<AgentDeps, 'db' | 'config' | 'secrets'>): Promise<{
   checked: number;
   cited: number;
   engines: string[];
   errors: number;
   skipped?: string;
 }> {
-  const e = env as CitEnv;
-  const cfg = siteConfig(env);
+  const cfg = deps.config;
   const queries = cfg.citations.queries;
-  const engines = ENGINES.filter((x) => x.enabled(e));
+  const engines = ENGINES.filter((x) => x.enabled(deps.secrets));
   if (queries.length === 0 || engines.length === 0) {
     return {
       checked: 0,
@@ -231,7 +225,7 @@ export async function runCitationProbes(env: Env): Promise<{
 
   const host = new URL(cfg.siteUrl).hostname;
   const checkedAt = new Date().toISOString();
-  const insert = env.DB.prepare(
+  const insert = deps.db.prepare(
     'INSERT INTO citations (checked_at, engine, query, cited, rank, cited_url, total_sources, sources, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
   );
   const statements = [];
@@ -242,7 +236,7 @@ export async function runCitationProbes(env: Env): Promise<{
       let sources: CitationSource[] = [];
       let error: string | null = null;
       try {
-        sources = await engine.call(e, cfg, query);
+        sources = await engine.call(deps.secrets, cfg, query);
       } catch (err) {
         error = (err instanceof Error ? err.message : String(err)).slice(0, 700);
         errors++;
@@ -264,7 +258,7 @@ export async function runCitationProbes(env: Env): Promise<{
       );
     }
   }
-  if (statements.length > 0) await env.DB.batch(statements);
+  if (statements.length > 0) await deps.db.batch(statements);
   const result = { checked: statements.length, cited, errors, engines: engines.map((x) => x.name) };
   console.log(JSON.stringify({ evt: 'citation_probes_complete', ...result }));
   return result;
@@ -279,12 +273,12 @@ const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
  *  - citation_gained (info): newly cited vs the previous check (event-style;
  *    auto-resolves after the following check).
  */
-export async function citationFindings(env: Env): Promise<Triggered[]> {
+export async function citationFindings(deps: Pick<AgentDeps, 'db'>): Promise<Triggered[]> {
   // Computed per (engine, query) in SQL — the latest two checks plus an
   // EVER-cited flag — so a long history that would overflow a fixed global row
   // window can't hide a key's earlier citation and mute citation_lost.
   const rows = (
-    await env.DB.prepare(
+    await deps.db.prepare(
       `WITH ranked AS (
          SELECT engine, query, cited, checked_at,
                 ROW_NUMBER() OVER (PARTITION BY engine, query ORDER BY checked_at DESC, id DESC) AS rn,

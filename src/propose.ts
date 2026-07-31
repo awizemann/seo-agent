@@ -7,7 +7,8 @@
  */
 
 import { applyOverride } from './overrides.js';
-import { siteConfig, type SiteConfig } from './config.js';
+import type { SiteConfig } from './config.js';
+import type { AgentDeps } from './deps.js';
 
 // The description-quality rules the AI drafting pipeline can fix. Exported so the
 // "Draft fix" action (actions.draftFinding) and the per-finding `draftable` flag
@@ -97,11 +98,11 @@ export type DraftTrace = { rawShape: string; raw: string; sanitized: string; rea
 
 /** Draft + validate with full intermediates — powers both the pipeline and the /proposals/dry-run diagnostics endpoint. */
 export async function draftWithTrace(
-  env: Env,
+  deps: Pick<AgentDeps, 'ai' | 'config'>,
   input: { path: string; title: string | null; current: string | null }
 ): Promise<{ value: string | null; trace: DraftTrace[] }> {
-  const ai = env.AI as unknown as TextGenAi;
-  const cfg = siteConfig(env);
+  const ai = deps.ai as unknown as TextGenAi;
+  const cfg = deps.config;
   const context = await pageContext(cfg, input.path);
   const messages = [
     { role: 'system', content: systemPrompt(cfg) },
@@ -135,8 +136,11 @@ export async function draftWithTrace(
   return { value: null, trace };
 }
 
-async function draft(env: Env, input: { path: string; title: string | null; current: string | null }): Promise<string | null> {
-  const { value, trace } = await draftWithTrace(env, input);
+async function draft(
+  deps: Pick<AgentDeps, 'ai' | 'config'>,
+  input: { path: string; title: string | null; current: string | null }
+): Promise<string | null> {
+  const { value, trace } = await draftWithTrace(deps, input);
   if (!value) {
     console.log(JSON.stringify({ evt: 'proposal_dropped', path: input.path, reasons: trace.map((t) => t.reason) }));
   }
@@ -158,12 +162,15 @@ export type DraftJob = {
  * consumer, one proposal per invocation, so a slow/variable model call can
  * never stall the run or exceed an invocation budget.
  */
-export async function enqueueCandidates(env: Env, runId: number): Promise<{ enqueued: number }> {
-  const max = siteConfig(env).maxProposalsPerRun;
+export async function enqueueCandidates(
+  deps: Pick<AgentDeps, 'db' | 'draftQueue' | 'config'>,
+  runId: number
+): Promise<{ enqueued: number }> {
+  const max = deps.config.maxProposalsPerRun;
   if (max === 0) return { enqueued: 0 };
 
   const candidates = (
-    await env.DB.prepare(
+    await deps.db.prepare(
       `SELECT f.id AS finding_id, f.path, f.rule, s.title, s.description
        FROM findings f
        JOIN page_snapshots s ON s.run_id = ?1 AND s.path = f.path
@@ -183,7 +190,7 @@ export async function enqueueCandidates(env: Env, runId: number): Promise<{ enqu
   const jobs = candidates
     .filter((c) => PROPOSABLE_RULES.has(c.rule))
     .map((c) => ({ findingId: c.finding_id, path: c.path, rule: c.rule, title: c.title, current: c.description }));
-  for (const job of jobs) await env.DRAFT_QUEUE.send(job);
+  for (const job of jobs) await deps.draftQueue.send(job);
 
   console.log(JSON.stringify({ evt: 'candidates_enqueued', runId, enqueued: jobs.length }));
   return { enqueued: jobs.length };
@@ -194,22 +201,22 @@ export async function enqueueCandidates(env: Env, runId: number): Promise<{ enqu
  * field is opted in). Runs in the queue consumer. Throwing signals the queue
  * to retry the message; returning (even with no proposal) acks it.
  */
-export async function draftAndCreate(env: Env, job: DraftJob): Promise<void> {
+export async function draftAndCreate(deps: Pick<AgentDeps, 'db' | 'overrides' | 'ai' | 'config'>, job: DraftJob): Promise<void> {
   // Idempotency: another run/attempt may have already produced a proposal for
   // this page — skip so retries and overlapping runs can't create duplicates.
-  const existing = await env.DB.prepare(
+  const existing = await deps.db.prepare(
     "SELECT 1 FROM proposals WHERE path = ? AND field = 'description' AND status IN ('proposed', 'approved') LIMIT 1"
   )
     .bind(job.path)
     .first();
   if (existing) return;
 
-  const cfg = siteConfig(env);
-  const value = await draft(env, { path: job.path, title: job.title, current: job.current });
+  const cfg = deps.config;
+  const value = await draft(deps, { path: job.path, title: job.title, current: job.current });
   if (!value) return; // invalid after retries — drop; the open finding re-enqueues next run
 
   const now = new Date().toISOString();
-  const proposal = await env.DB.prepare(
+  const proposal = await deps.db.prepare(
     `INSERT INTO proposals (created_at, finding_id, path, field, current_value, proposed_value, rationale, model)
      VALUES (?, ?, ?, 'description', ?, ?, ?, ?) RETURNING id`
   )
@@ -218,8 +225,8 @@ export async function draftAndCreate(env: Env, job: DraftJob): Promise<void> {
 
   const autoFields = new Set(cfg.autoApplyFields);
   if (proposal && autoFields.has('description')) {
-    await applyOverride(env, { path: job.path, field: 'description', value, oldValue: job.current, source: 'auto', proposalId: proposal.id });
-    await env.DB.prepare("UPDATE proposals SET status = 'approved', decided_at = ?, applied_at = ? WHERE id = ?")
+    await applyOverride(deps, { path: job.path, field: 'description', value, oldValue: job.current, source: 'auto', proposalId: proposal.id });
+    await deps.db.prepare("UPDATE proposals SET status = 'approved', decided_at = ?, applied_at = ? WHERE id = ?")
       .bind(now, now, proposal.id)
       .run();
   }
