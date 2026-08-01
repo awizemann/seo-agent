@@ -9,7 +9,7 @@ import { runRules, validateTitle, type Triggered } from './rules.js';
 import { aeoChecks } from './aeo.js';
 import { enqueueCandidates, draftWithTrace, PROPOSABLE_RULES } from './propose.js';
 import { ingestGsc } from './gsc.js';
-import { applyOverride, revertChange } from './overrides.js';
+import { applyOverride, applyResource, revertChange, RESOURCE_FIELDS, RESOURCE_MAX_CHARS } from './overrides.js';
 import { telemetrySummary, telemetryFindings, pruneTelemetry, rollupTelemetryWeekly, listCrawlerHits as telemetryHits } from './telemetry.js';
 import { runCitationProbes, citationFindings, citationConfig, alreadyCheckedToday } from './citations.js';
 import { impactFindings } from './impact.js';
@@ -419,27 +419,50 @@ export async function decideProposal(deps: Pick<AgentDeps, 'db' | 'overrides'>, 
     await deps.db.prepare("UPDATE proposals SET status = 'rejected', decided_at = ? WHERE id = ?").bind(now, id).run();
     return { ok: true, id, status: 'rejected' };
   }
-  const changeId = await applyOverride(deps, {
-    path: p.path,
-    field: p.field,
-    value: p.proposed_value,
-    oldValue: p.current_value,
-    source: 'proposal',
-    proposalId: p.id,
-  });
+  // Resource fields (llms_txt) publish a whole file to its own KV key; page
+  // fields merge into the path's override object. Same journal either way, so
+  // approve/revert read identically from the outside.
+  const changeId = RESOURCE_FIELDS.has(p.field)
+    ? await applyResource(deps, {
+        field: p.field,
+        value: p.proposed_value,
+        oldValue: p.current_value,
+        source: 'proposal',
+        proposalId: p.id,
+      })
+    : await applyOverride(deps, {
+        path: p.path,
+        field: p.field,
+        value: p.proposed_value,
+        oldValue: p.current_value,
+        source: 'proposal',
+        proposalId: p.id,
+      });
   await deps.db.prepare("UPDATE proposals SET status = 'approved', decided_at = ?, applied_at = ? WHERE id = ?").bind(now, now, id).run();
   return { ok: true, id, status: 'approved', changeId, note: 'live within the KV cache TTL (~5 min)' };
 }
 
 export async function createProposal(
   deps: Pick<AgentDeps, 'db'>,
-  args: { path?: string; field?: string; value?: string; rationale?: string },
+  args: { path?: string; field?: string; value?: string; rationale?: string; currentValue?: string | null },
   validateDescription: (text: string) => string | null
 ) {
   const field = args.field || 'description';
   if (!args.path || !args.value) throw new ApiError('path and value required', 400);
-  if (field !== 'description' && field !== 'title') throw new ApiError('field must be description or title', 400);
-  if (field === 'description') {
+  const resource = RESOURCE_FIELDS.get(field);
+  if (field !== 'description' && field !== 'title' && !resource) {
+    throw new ApiError(`field must be description, title, or one of: ${[...RESOURCE_FIELDS.keys()].join(', ')}`, 400);
+  }
+  if (resource) {
+    // A resource body is a whole file, not a meta string: the only checks that
+    // generalize are "not blank" and a sanity bound. Its path is pinned by the
+    // field, so a mismatched one is a caller bug, not a second resource.
+    if (args.path !== resource.path) throw new ApiError(`field ${field} is always published at ${resource.path}`, 400);
+    if (!args.value.trim()) throw new ApiError(`invalid ${field}: empty after trimming`, 400);
+    if (args.value.length > RESOURCE_MAX_CHARS) {
+      throw new ApiError(`invalid ${field}: too long (${args.value.length} chars, max ${RESOURCE_MAX_CHARS})`, 400);
+    }
+  } else if (field === 'description') {
     const reason = validateDescription(args.value);
     if (reason) throw new ApiError(`invalid description: ${reason}`, 400);
   } else {
@@ -447,21 +470,23 @@ export async function createProposal(
     const reason = validateTitle(args.value);
     if (reason) throw new ApiError(`invalid title: ${reason}`, 400);
   }
-  const snap = await deps.db.prepare('SELECT title, description FROM page_snapshots WHERE path = ? ORDER BY id DESC LIMIT 1')
-    .bind(args.path)
-    .first<{ title: string | null; description: string | null }>();
+  // A resource's current value lives in KV, not in a page snapshot, so the
+  // caller supplies it (createLlmsTxtProposal reads it); page fields keep
+  // deriving it from the newest snapshot and ignore any supplied value.
+  let currentValue: string | null;
+  if (resource) {
+    currentValue = args.currentValue ?? null;
+  } else {
+    const snap = await deps.db.prepare('SELECT title, description FROM page_snapshots WHERE path = ? ORDER BY id DESC LIMIT 1')
+      .bind(args.path)
+      .first<{ title: string | null; description: string | null }>();
+    currentValue = (field === 'description' ? snap?.description : snap?.title) ?? null;
+  }
   const row = await deps.db.prepare(
     `INSERT INTO proposals (created_at, path, field, current_value, proposed_value, rationale, model)
      VALUES (?, ?, ?, ?, ?, ?, 'manual') RETURNING id`
   )
-    .bind(
-      new Date().toISOString(),
-      args.path,
-      field,
-      (field === 'description' ? snap?.description : snap?.title) ?? null,
-      args.value,
-      args.rationale || 'manual'
-    )
+    .bind(new Date().toISOString(), args.path, field, currentValue, args.value, args.rationale || 'manual')
     .first<{ id: number }>();
   return { ok: true, id: row?.id, status: 'proposed' };
 }

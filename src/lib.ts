@@ -67,6 +67,18 @@ export {
 
 export { analyticsSummary, analyticsPage, analyticsImpact } from './analytics.js';
 
+// llms.txt — build the answer-engine index from the latest crawl, and propose
+// it for approval. Approving publishes it as a KV resource override
+// (`resource:/llms.txt`), which the site's injector serves.
+export { buildLlmsTxt, generateLlmsTxt, createLlmsTxtProposal, LLMS_TXT_MAX_ENTRIES } from './llmstxt.js';
+export type { LlmsTxtPage, LlmsTxtConfig } from './llmstxt.js';
+
+// Resource overrides — the whole-file half of the override layer. The registry
+// pins each field's path and content type, so a host reads it rather than
+// hard-coding key names.
+export { RESOURCE_FIELDS, RESOURCE_MAX_CHARS, resourceKey, readResource } from './overrides.js';
+export type { ResourceSpec } from './overrides.js';
+
 // Drafting — the queue consumer half, and the validator the drafts must pass.
 export { draftAndCreate, invalidReason } from './propose.js';
 export type { DraftJob, DraftTrace } from './propose.js';

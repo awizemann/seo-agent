@@ -18,6 +18,8 @@
   // set OVERRIDES_URL (+ EDGE_TOKEN as a secret) in vars instead — the
   // injector fetches `${OVERRIDES_URL}/override?path=<pathname>` over HTTPS
   // with a 300s edge cache. Same JSON contract. A KV binding, if present, wins.
+  // Resource overrides (llms.txt, llms-full.txt) have the same remote twin:
+  // `${OVERRIDES_URL}/resource?path=<pathname>`, same bearer, same edge cache.
   // Telemetry has the same twin: set TELEMETRY_URL instead of the D1 binding.
   "kv_namespaces": [{ "binding": "SEO_OVERRIDES", "id": "REPLACE_WITH_YOUR_KV_NAMESPACE_ID" }],
 

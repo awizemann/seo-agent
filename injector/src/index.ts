@@ -11,6 +11,14 @@
  * twitter:description) only when an override exists, otherwise it proxies the
  * origin byte-for-byte.
  *
+ * Resource overrides: the agent also writes `resource:<pathname>` → JSON
+ * `{ "contentType", "body" }` for a small, fixed set of well-known paths
+ * (RESOURCE_PATHS — currently /llms.txt and /llms-full.txt). A GET/HEAD to
+ * one of those paths checks for a resource override BEFORE contacting the
+ * origin; if found, it's served directly (never proxied). No override →
+ * normal proxying, so an origin that serves its own llms.txt is never
+ * shadowed by a false 404.
+ *
  * FAIL-OPEN: any error serves the origin response untouched, so the injector
  * can never take the fronted site down. Zero dependencies.
  *
@@ -21,6 +29,12 @@
  */
 
 type Override = { title?: string; description?: string };
+
+// Fixed allowlist of well-known resource paths — a resource lookup only ever
+// happens for these, so ordinary traffic pays no extra KV/fetch cost.
+const RESOURCE_PATHS = ['/llms.txt', '/llms-full.txt'];
+
+type ResourceOverride = { contentType: string; body: string };
 
 // ---------------------------------------------------------------------------
 // AEO telemetry tap (optional) — bind the seo-agent's D1 database as TELEMETRY
@@ -131,6 +145,46 @@ async function readOverride(env: Env, pathname: string, ctx: ExecutionContext): 
   }
 }
 
+// Resource overrides — same KV-wins-over-remote precedence and same 300s
+// cache-incl-404 pattern as the head-tag overrides above, but the value is
+// served as the whole response body instead of being merged into HTML.
+async function readResourceOverrideRemote(env: RemoteEnv, pathname: string, ctx: ExecutionContext): Promise<ResourceOverride | null> {
+  const url = `${env.OVERRIDES_URL!.replace(/\/$/, '')}/resource?path=${encodeURIComponent(pathname || '/')}`;
+  const cache = caches.default;
+  const cacheKey = new Request(url); // token deliberately not part of the key
+  let res = await cache.match(cacheKey);
+  if (!res) {
+    res = await fetch(url, {
+      headers: env.EDGE_TOKEN ? { authorization: `Bearer ${env.EDGE_TOKEN}` } : undefined,
+    });
+    // Cache 200s AND 404s so paths without overrides don't refetch per request.
+    if (res.status === 200 || res.status === 404) {
+      const copy = new Response(res.clone().body, res);
+      copy.headers.set('cache-control', 'public, max-age=300');
+      ctx.waitUntil(cache.put(cacheKey, copy));
+    }
+  }
+  if (res.status !== 200) return null;
+  const o = (await res.json()) as ResourceOverride;
+  return o && o.contentType && typeof o.body === 'string' ? o : null;
+}
+
+async function readResourceOverride(env: Env, pathname: string, ctx: ExecutionContext): Promise<ResourceOverride | null> {
+  try {
+    const kv = (env as { SEO_OVERRIDES?: KVNamespace }).SEO_OVERRIDES;
+    if (kv) {
+      const raw = await kv.get(`resource:${pathname || '/'}`, { cacheTtl: 300 });
+      if (!raw) return null;
+      const o = JSON.parse(raw) as ResourceOverride;
+      return o && o.contentType && typeof o.body === 'string' ? o : null;
+    }
+    if ((env as RemoteEnv).OVERRIDES_URL) return await readResourceOverrideRemote(env as RemoteEnv, pathname, ctx);
+    return null;
+  } catch {
+    return null; // fail-open: no override applied, falls through to normal proxying
+  }
+}
+
 function inject(res: Response, o: Override): Response {
   const setContent = (value: string) => ({
     element(el: { setAttribute(n: string, v: string): void }) {
@@ -178,6 +232,27 @@ export default {
     // after the primary fetch consumed request's body (a POST/PUT with a body).
     const fallback = request.clone();
     try {
+      // Resource overrides: only for the fixed allowlist, and only GET/HEAD —
+      // no lookup tax on other paths or methods. Checked before the markdown
+      // lane and before the origin fetch: a hit is served directly and never
+      // touches the origin.
+      const isHeadMethod = request.method === 'HEAD';
+      if ((request.method === 'GET' || isHeadMethod) && RESOURCE_PATHS.includes(url.pathname)) {
+        const resource = await readResourceOverride(env, url.pathname, ctx);
+        if (resource) {
+          tapAeo(env, ctx, request, url.pathname, 200, 'file');
+          return new Response(isHeadMethod ? null : resource.body, {
+            status: 200,
+            headers: {
+              'content-type': resource.contentType,
+              'cache-control': 'public, max-age=300',
+            },
+          });
+        }
+        // No override → fall through to normal proxying below; the origin
+        // may legitimately serve its own file at this path.
+      }
+
       // Markdown lane ("markdown for agents"): a GET or HEAD that accepts
       // text/markdown on a clean URL is answered with the origin's pregenerated
       // .md twin when one exists (/eo/x → /eo/x.md), with Cloudflare-compatible
