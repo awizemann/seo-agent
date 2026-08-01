@@ -40,7 +40,8 @@ const AI_REFERRER_RE =
 function tapAeo(env: Env, ctx: ExecutionContext, request: Request, path: string, status: number, served: string): void {
   try {
     const db = (env as Env & { TELEMETRY?: D1Lite }).TELEMETRY;
-    if (!db) return;
+    const remoteUrl = (env as Env & { TELEMETRY_URL?: string; EDGE_TOKEN?: string }).TELEMETRY_URL;
+    if (!db && !remoteUrl) return;
     const ua = request.headers.get('user-agent') || '';
     if (/seo-agent/i.test(ua)) return; // the agent's own crawler/sampler — never self-count
     const bot = ua.match(AI_BOT_RE)?.[0] ?? null;
@@ -55,24 +56,76 @@ function tapAeo(env: Env, ctx: ExecutionContext, request: Request, path: string,
     }
     if (!bot && !refHost && served !== 'md') return;
     const kind = bot ? 'crawler' : refHost ? 'referral' : 'agent';
-    ctx.waitUntil(
-      db
-        .prepare('INSERT INTO aeo_hits (ts, kind, bot, referrer, path, status, served, ua) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-        .bind(new Date().toISOString(), kind, bot, refHost, path, status, served, ua.slice(0, 200))
-        .run()
-        .catch(() => {})
-    );
+    if (db) {
+      ctx.waitUntil(
+        db
+          .prepare('INSERT INTO aeo_hits (ts, kind, bot, referrer, path, status, served, ua) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+          .bind(new Date().toISOString(), kind, bot, refHost, path, status, served, ua.slice(0, 200))
+          .run()
+          .catch(() => {})
+      );
+    } else if (remoteUrl) {
+      const token = (env as Env & { EDGE_TOKEN?: string }).EDGE_TOKEN;
+      ctx.waitUntil(
+        fetch(remoteUrl, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+          body: JSON.stringify({ ts: new Date().toISOString(), kind, bot, referrer: refHost, path, status, served, ua: ua.slice(0, 200) }),
+        }).catch(() => {})
+      );
+    }
   } catch {
     // telemetry must never affect serving
   }
 }
 
-async function readOverride(env: Env, pathname: string): Promise<Override | null> {
+// ---------------------------------------------------------------------------
+// Remote mode (optional) — for split infrastructure where the agent's KV/D1
+// can't be bound from this zone (agent in another account, or a hosted
+// service managing overrides). Vars instead of bindings:
+//   OVERRIDES_URL — fetch `${OVERRIDES_URL}/override?path=<pathname>` over
+//                   HTTPS; JSON contract unchanged; 404 = no override. Cached
+//                   at this Worker's edge (Cache API, 300s) to match the KV
+//                   cacheTtl behavior. A KV binding, when present, wins.
+//   EDGE_TOKEN    — bearer sent with both remote calls.
+//   TELEMETRY_URL — POST aeo_hits rows there instead of the TELEMETRY D1
+//                   binding (same fire-and-forget, never affects serving).
+// ---------------------------------------------------------------------------
+
+type RemoteEnv = Env & { OVERRIDES_URL?: string; EDGE_TOKEN?: string; TELEMETRY_URL?: string };
+
+async function readOverrideRemote(env: RemoteEnv, pathname: string, ctx: ExecutionContext): Promise<Override | null> {
+  const url = `${env.OVERRIDES_URL!.replace(/\/$/, '')}/override?path=${encodeURIComponent(pathname || '/')}`;
+  const cache = caches.default;
+  const cacheKey = new Request(url); // token deliberately not part of the key
+  let res = await cache.match(cacheKey);
+  if (!res) {
+    res = await fetch(url, {
+      headers: env.EDGE_TOKEN ? { authorization: `Bearer ${env.EDGE_TOKEN}` } : undefined,
+    });
+    // Cache 200s AND 404s so paths without overrides don't refetch per request.
+    if (res.status === 200 || res.status === 404) {
+      const copy = new Response(res.clone().body, res);
+      copy.headers.set('cache-control', 'public, max-age=300');
+      ctx.waitUntil(cache.put(cacheKey, copy));
+    }
+  }
+  if (res.status !== 200) return null;
+  const o = (await res.json()) as Override;
+  return o.title || o.description ? o : null;
+}
+
+async function readOverride(env: Env, pathname: string, ctx: ExecutionContext): Promise<Override | null> {
   try {
-    const raw = await env.SEO_OVERRIDES.get(`override:${pathname || '/'}`, { cacheTtl: 300 });
-    if (!raw) return null;
-    const o = JSON.parse(raw) as Override;
-    return o.title || o.description ? o : null;
+    const kv = (env as { SEO_OVERRIDES?: KVNamespace }).SEO_OVERRIDES;
+    if (kv) {
+      const raw = await kv.get(`override:${pathname || '/'}`, { cacheTtl: 300 });
+      if (!raw) return null;
+      const o = JSON.parse(raw) as Override;
+      return o.title || o.description ? o : null;
+    }
+    if ((env as RemoteEnv).OVERRIDES_URL) return await readOverrideRemote(env as RemoteEnv, pathname, ctx);
+    return null;
   } catch {
     return null; // fail-open: no override applied
   }
@@ -173,7 +226,7 @@ export default {
       }
 
       tapAeo(env, ctx, request, url.pathname, res.status, 'html');
-      const override = await readOverride(env, url.pathname);
+      const override = await readOverride(env, url.pathname, ctx);
       // The same URL can serve markdown via Accept negotiation, so an HTML
       // response varies by Accept — even when we pass it through untouched.
       if (!override) {

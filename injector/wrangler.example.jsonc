@@ -13,6 +13,12 @@
   "routes": [{ "pattern": "www.example.com/*", "zone_name": "example.com" }],
 
   // The SAME KV namespace your seo-agent writes overrides to.
+  // REMOTE MODE alternative: if the agent's KV can't be bound from this zone
+  // (agent in another account, or a hosted service), delete this binding and
+  // set OVERRIDES_URL (+ EDGE_TOKEN as a secret) in vars instead — the
+  // injector fetches `${OVERRIDES_URL}/override?path=<pathname>` over HTTPS
+  // with a 300s edge cache. Same JSON contract. A KV binding, if present, wins.
+  // Telemetry has the same twin: set TELEMETRY_URL instead of the D1 binding.
   "kv_namespaces": [{ "binding": "SEO_OVERRIDES", "id": "REPLACE_WITH_YOUR_KV_NAMESPACE_ID" }],
 
   // OPTIONAL — AEO telemetry tap: bind the seo-agent's D1 database and the
