@@ -17,7 +17,9 @@
  * one of those paths checks for a resource override BEFORE contacting the
  * origin; if found, it's served directly (never proxied). No override →
  * normal proxying, so an origin that serves its own llms.txt is never
- * shadowed by a false 404.
+ * shadowed by a false 404. A request carrying `x-seo-agent-bypass: resource`
+ * skips that lookup entirely and is proxied to the origin — how the agent reads
+ * the origin's real file when regenerating one.
  *
  * FAIL-OPEN: any error serves the origin response untouched, so the injector
  * can never take the fronted site down. Zero dependencies.
@@ -236,8 +238,15 @@ export default {
       // no lookup tax on other paths or methods. Checked before the markdown
       // lane and before the origin fetch: a hit is served directly and never
       // touches the origin.
+      // `x-seo-agent-bypass: resource` asks for the ORIGIN's own file instead of
+      // whatever we publish over it. The agent's robots.txt/llms.txt generators
+      // send it: they must append to the origin's CURRENT bytes, and a fetch
+      // answered by our own last override would append to itself and silently
+      // drop everything the owner changed since. Safe to honour from anyone —
+      // it only ever serves the public file the origin already serves.
+      const bypassResource = (request.headers.get('x-seo-agent-bypass') || '').trim().toLowerCase() === 'resource';
       const isHeadMethod = request.method === 'HEAD';
-      if ((request.method === 'GET' || isHeadMethod) && RESOURCE_PATHS.includes(url.pathname)) {
+      if (!bypassResource && (request.method === 'GET' || isHeadMethod) && RESOURCE_PATHS.includes(url.pathname)) {
         const resource = await readResourceOverride(env, url.pathname, ctx);
         if (resource) {
           tapAeo(env, ctx, request, url.pathname, 200, 'file');

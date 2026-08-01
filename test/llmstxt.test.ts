@@ -168,6 +168,9 @@ function fakeDb(t: Tables) {
       t.proposals.push(row);
       return { first: row, all: [], meta: {} };
     }
+    if (/SELECT id FROM proposals WHERE field = \? AND status = 'proposed'/.test(sql)) {
+      return { first: t.proposals.find((p) => p.field === b[0] && p.status === 'proposed') ?? null, all: [], meta: {} };
+    }
     if (/SELECT \* FROM proposals WHERE id = \? AND status = 'proposed'/.test(sql)) {
       return { first: t.proposals.find((p) => p.id === b[0] && p.status === 'proposed') ?? null, all: [], meta: {} };
     }
@@ -256,6 +259,14 @@ describe('createProposal — llms_txt field gate', () => {
     expect(d.tables.proposals[0]).toMatchObject({ field: 'llms_txt', path: '/llms.txt', current_value: 'old body', proposed_value: BODY });
   });
 
+  it('409s on a second proposal for the same file while one is awaiting review', async () => {
+    const d = deps();
+    await createProposal(d.deps, { path: '/llms.txt', field: 'llms_txt', value: BODY }, () => null);
+    await expect(createProposal(d.deps, { path: '/llms.txt', field: 'llms_txt', value: BODY + '- [B](x)\n' }, () => null))
+      .rejects.toThrow(/already awaiting review/);
+    expect(d.tables.proposals).toHaveLength(1);
+  });
+
   it('rejects a blank body', async () => {
     await expect(createProposal(deps().deps, { path: '/llms.txt', field: 'llms_txt', value: '   \n ' }, () => null)).rejects.toThrow(
       /empty after trimming/
@@ -320,6 +331,16 @@ describe('decideProposal — approving an llms_txt proposal', () => {
     expect(d.tables.changes[0].old_value).toBe('live body');
   });
 
+  it('journals old_value = null when the ORIGIN had a file but we had published nothing', async () => {
+    // current_value is a snapshot of the origin's own /llms.txt — a body we
+    // never published and cannot restore. Journalling it would make revert pin
+    // a frozen copy instead of handing the path back to the origin.
+    const d = deps();
+    await createProposal(d.deps, { path: '/llms.txt', field: 'llms_txt', value: BODY, currentValue: 'the origin\'s own file' }, () => null);
+    await decideProposal(d.deps, 1, 'approve');
+    expect(d.tables.changes[0].old_value).toBeNull();
+  });
+
   it('rejects without touching KV', async () => {
     const d = deps();
     await createProposal(d.deps, { path: '/llms.txt', field: 'llms_txt', value: BODY }, () => null);
@@ -349,6 +370,30 @@ describe('revertById — llms_txt changes', () => {
     await decideProposal(d.deps, 1, 'approve');
     await revertById(d.deps, 1);
     expect(d.store.has('resource:/llms.txt')).toBe(false);
+  });
+
+  it('deletes the key on revert of a FIRST publish over an origin-served file', async () => {
+    // The origin serves its own /llms.txt; we publish over it once, then revert.
+    // Correct end state is our key GONE, so the origin serves again — not a
+    // pinned copy of whatever the origin happened to serve at proposal time.
+    const d = deps();
+    await createProposal(d.deps, { path: '/llms.txt', field: 'llms_txt', value: BODY, currentValue: 'origin body' }, () => null);
+    await decideProposal(d.deps, 1, 'approve');
+    await revertById(d.deps, 1);
+    expect(d.store.has('resource:/llms.txt')).toBe(false);
+  });
+
+  it('restores the first published body when the second publish is reverted', async () => {
+    // Two approvals, no revert in between: the first body IS ours, so reverting
+    // the newer change must put it back rather than delete the key.
+    const d = deps();
+    await createProposal(d.deps, { path: '/llms.txt', field: 'llms_txt', value: BODY, currentValue: null }, () => null);
+    await decideProposal(d.deps, 1, 'approve');
+    const second = BODY + '- [B](x)\n';
+    await createProposal(d.deps, { path: '/llms.txt', field: 'llms_txt', value: second }, () => null);
+    await decideProposal(d.deps, 2, 'approve');
+    await revertById(d.deps, 2);
+    expect(JSON.parse(d.store.get('resource:/llms.txt')!).body).toBe(BODY);
   });
 
   it('refuses to revert an older change when a newer one is live', async () => {

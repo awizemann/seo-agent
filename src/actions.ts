@@ -426,7 +426,8 @@ export async function decideProposal(deps: Pick<AgentDeps, 'db' | 'overrides'>, 
     ? await applyResource(deps, {
         field: p.field,
         value: p.proposed_value,
-        oldValue: p.current_value,
+        // No oldValue: a resource's prior state is whatever WE published (see
+        // applyResource) — the proposal's origin snapshot is not ours to restore.
         source: 'proposal',
         proposalId: p.id,
       })
@@ -462,6 +463,15 @@ export async function createProposal(
     if (args.value.length > RESOURCE_MAX_CHARS) {
       throw new ApiError(`invalid ${field}: too long (${args.value.length} chars, max ${RESOURCE_MAX_CHARS})`, 400);
     }
+    // One open proposal per file. A resource proposal is the WHOLE file, so two
+    // of them are two rival versions of the same bytes: approving both applies
+    // the older one's body second (last write wins) and the reviewer has no way
+    // to see that from either diff. Page fields don't need this — they're a
+    // single meta string, and the newest approval is unambiguously the answer.
+    const open = await deps.db.prepare("SELECT id FROM proposals WHERE field = ? AND status = 'proposed' LIMIT 1")
+      .bind(field)
+      .first<{ id: number }>();
+    if (open) throw new ApiError(`a proposal for this file is already awaiting review (#${open.id})`, 409);
   } else if (field === 'description') {
     const reason = validateDescription(args.value);
     if (reason) throw new ApiError(`invalid description: ${reason}`, 400);

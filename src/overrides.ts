@@ -70,15 +70,23 @@ export async function readResource(deps: Pick<AgentDeps, 'overrides'>, path: str
  */
 export async function applyResource(
   deps: Pick<AgentDeps, 'db' | 'overrides'>,
-  args: { field: string; value: string; oldValue: string | null; source: string; proposalId?: number }
+  args: { field: string; value: string; source: string; proposalId?: number }
 ): Promise<number> {
   const spec = RESOURCE_FIELDS.get(args.field);
   if (!spec) throw new Error(`field not a resource: ${args.field}`);
-  // Journal the TRUE prior state, for the same reason applyOverride does: what
-  // a revert must restore is whatever is live in KV now, not the body captured
-  // when the proposal was drafted.
-  const live = await readResource(deps, spec.path);
-  const oldValue = live !== null ? live : args.oldValue;
+  // Journal the TRUE prior state — and for a RESOURCE, the only prior state we
+  // own is what is live in KV. The proposal's current_value is a snapshot of the
+  // ORIGIN's own file, which we never published and must not "restore": the way
+  // to give the origin its file back is to delete our key and let it serve
+  // again. Journalling the origin snapshot here would make revert PUT a pinned
+  // copy of a file we don't control — the origin could have changed twice over,
+  // and "revert" would freeze a stale body forever.
+  //
+  // So: no live value → old_value NULL → revert deletes the key. A live value
+  // (a second approval before any revert) IS ours, and revert restores it.
+  // Deliberately unlike applyOverride, whose page fields merge into a value the
+  // site itself bakes in, and whose snapshot old_value is meaningful.
+  const oldValue = await readResource(deps, spec.path);
   await deps.overrides.put(resourceKey(spec.path), JSON.stringify({ contentType: spec.contentType, body: args.value }));
 
   const now = new Date().toISOString();

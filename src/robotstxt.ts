@@ -21,8 +21,8 @@
  */
 
 import { createProposal, ApiError } from './actions.js';
-import { RESOURCE_FIELDS } from './overrides.js';
-import { ANSWER_ENGINE_BOTS, classifyTextResource, parseRobots, robotsDecision, type RobotsGroup } from './aeo.js';
+import { RESOURCE_FIELDS, RESOURCE_MAX_CHARS } from './overrides.js';
+import { ANSWER_ENGINE_BOTS, classifyTextResource, parseRobots, robotsDecision } from './aeo.js';
 import { VERSION } from './version.js';
 import type { AgentDeps } from './deps.js';
 
@@ -59,23 +59,60 @@ function managedRanges(lines: string[]): Array<[number, number]> {
 }
 
 /**
- * The `User-agent: *` rules a newly added bot group must carry. REP evaluates
- * the MOST SPECIFIC matching group exclusively: the moment we write an explicit
- * `User-agent: Googlebot` group, every `*` rule stops applying to Googlebot. So
- * a bare "User-agent: X / Allow: /" would not be an addition at all — it would
- * silently lift the site's own Disallows for that bot. Copying the `*` rules in
- * keeps the bot's effective policy byte-for-byte what it was, with `Allow: /`
- * only restating the fallback that was already in force (longest-match means a
- * copied `Disallow: /admin/` still wins over it).
+ * Fields that belong to the FILE, not to a group. Copying `Sitemap:` into a
+ * per-bot group would be meaningless (it is already global) and duplicate
+ * noise; `Host:` is the same shape of non-group directive.
  */
-function starRules(groups: RobotsGroup[]): string[] {
+const NON_GROUP_FIELDS = new Set(['sitemap', 'host']);
+
+/** `Allow: /` (or `Allow: /*`) — the rule every generated group states itself. */
+const isAllowRoot = (line: string): boolean => /^allow\s*:\s*\/\*?$/i.test(line);
+
+/**
+ * The `User-agent: *` directives a newly added bot group must carry. REP
+ * evaluates the MOST SPECIFIC matching group exclusively: the moment we write an
+ * explicit `User-agent: Googlebot` group, every `*` rule stops applying to
+ * Googlebot. So a bare "User-agent: X / Allow: /" would not be an addition at
+ * all — it would silently lift the site's own Disallows for that bot. Copying
+ * the `*` rules in keeps the bot's effective policy byte-for-byte what it was,
+ * with `Allow: /` only restating the fallback that was already in force
+ * (longest-match means a copied `Disallow: /admin/` still wins over it).
+ *
+ * Read off the RAW text rather than parseRobots' groups, because the parser
+ * keeps only Allow/Disallow. Anything else a `*` group carries — `Crawl-delay`,
+ * `Clean-param`, a directive neither we nor the parser has heard of — is
+ * group-level too, and dropping it would quietly change policy for exactly the
+ * bots we are making explicit. So every group-level line is carried verbatim,
+ * recognized or not.
+ */
+function starDirectives(txt: string): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
-  for (const g of groups) {
-    if (!g.agents.includes('*')) continue;
-    for (const a of g.allows) if (a && !seen.has(`a${a}`)) (seen.add(`a${a}`), out.push(`Allow: ${a}`));
+  let inStar = false;
+  let lastWasAgent = false;
+  for (const rawLine of txt.split(/\r?\n/)) {
+    const line = rawLine.replace(/#.*$/, '').trim();
+    if (!line) continue;
+    const m = line.match(/^([A-Za-z-]+)\s*:\s*(.*)$/);
+    if (!m) continue;
+    const field = m[1].toLowerCase();
+    const value = m[2].trim();
+    if (field === 'user-agent') {
+      // A User-agent line after RULES opens a new group; after another
+      // User-agent line it only adds an alias to the group being opened.
+      if (!lastWasAgent) inStar = false;
+      if (value === '*') inStar = true;
+      lastWasAgent = true;
+      continue;
+    }
+    lastWasAgent = false;
+    if (!inStar || NON_GROUP_FIELDS.has(field)) continue;
     // An empty "Disallow:" means allow-all — nothing to carry over.
-    for (const d of g.disallows) if (d && !seen.has(`d${d}`)) (seen.add(`d${d}`), out.push(`Disallow: ${d}`));
+    if ((field === 'disallow' || field === 'allow') && value === '') continue;
+    const key = `${field}:${value.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(`${m[1]}: ${value}`);
   }
   return out;
 }
@@ -109,21 +146,35 @@ export function appendAiPolicy(currentBody: string, bots: string[]): string {
     .join('\n')
     .replace(/^﻿/, '');
   const groups = parseRobots(outside);
-  const named = new Set(groups.flatMap((g) => g.agents.map((a) => a.toLowerCase())));
-  const inherited = starRules(groups);
+  const tokens = groups.flatMap((g) => g.agents.map((a) => a.toLowerCase())).filter((a) => a !== '' && a !== '*');
+  const inherited = starDirectives(outside);
 
-  const add = bots.filter((b) => !named.has(b.toLowerCase()) && robotsDecision(groups, b, '/') === 'allow');
+  // Crawlers match a user-agent token by PREFIX, not equality: a group headed
+  // `User-agent: ChatGPT` is the policy ChatGPT-User obeys. Treating that as
+  // "not named" and appending our own ChatGPT-User group would override the
+  // owner's line for that bot — the one thing this module must never do.
+  const named = (bot: string): boolean => {
+    const b = bot.toLowerCase();
+    return tokens.some((t) => b.startsWith(t));
+  };
+
+  const add = bots.filter((b) => !named(b) && robotsDecision(groups, b, '/') === 'allow');
 
   const eol = /\r\n/.test(currentBody) ? '\r' : '';
+  // `Allow: /` is stated by every generated group, so an inherited copy of it
+  // would be a duplicate line; and when it is ALL the * group has to give, the
+  // groups repeat nothing worth explaining — drop the explanatory comment too.
+  const extras = inherited.filter((l) => !isAllowRoot(l));
+  const rules = ['Allow: /', ...extras];
   const block: string[] = [];
   if (add.length > 0) {
     block.push(AI_POLICY_BEGIN);
-    if (inherited.length > 0) {
+    if (extras.length > 0) {
       block.push('# Each group repeats your existing "User-agent: *" rules, because an');
       block.push('# explicit group replaces (never merges with) the * group for that bot.');
     }
     for (const bot of add) {
-      block.push('', `User-agent: ${bot}`, 'Allow: /', ...inherited);
+      block.push('', `User-agent: ${bot}`, ...rules);
     }
     block.push(AI_POLICY_END);
   }
@@ -161,16 +212,69 @@ export function appendAiPolicy(currentBody: string, bots: string[]): string {
 
 type FetchedRobots = { status: number; contentType: string; body: string; error: string | null };
 
-async function fetchRobots(url: string): Promise<FetchedRobots> {
+/**
+ * Header that tells our own injector to skip resource-override serving and
+ * proxy the origin instead. The generator MUST append to the origin's bytes:
+ * a fetch that lands on our own published override would append to the file we
+ * published last time, so the origin's edits since would silently vanish from
+ * the proposal (and from robots.txt, once approved).
+ */
+export const BYPASS_HEADER = 'x-seo-agent-bypass';
+export const BYPASS_RESOURCE = 'resource';
+
+/**
+ * A retry UA for origins that answer our crawler with a 403. Bot-management
+ * rules routinely block anything that doesn't look like a browser, and robots.txt
+ * is public either way — this is about reading a file the whole world can read,
+ * not about evading a policy.
+ */
+const BROWSER_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
+
+async function fetchRobots(url: string, userAgent: string): Promise<FetchedRobots> {
   try {
     const res = await fetch(url, {
+      headers: { 'user-agent': userAgent, accept: '*/*', [BYPASS_HEADER]: BYPASS_RESOURCE },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      redirect: 'follow',
+    });
+    // Bound the body BEFORE anything else touches it: a multi-megabyte
+    // "robots.txt" (a mislabelled dump, a proxy looping) would otherwise be
+    // parsed, diffed and rendered on its way to failing createProposal's size
+    // check anyway. Fail here, where the message can name the actual size.
+    const text = await res.text();
+    if (text.length > RESOURCE_MAX_CHARS) {
+      throw new ApiError(`your robots.txt is too large to manage (${text.length} chars, max ${RESOURCE_MAX_CHARS})`, 400);
+    }
+    return { status: res.status, contentType: res.headers.get('content-type') || '', body: text, error: null };
+  } catch (err) {
+    if (err instanceof ApiError) throw err; // the size bound is a verdict, not a fetch failure
+    return { status: 0, contentType: '', body: '', error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * A misconfigured origin can serve a perfectly real robots.txt as text/html,
+ * which classifyTextResource calls a soft 404. Synthesizing over that would
+ * DELETE the owner's rules — the one thing this module promises never to do. So
+ * a soft-404 whose body is plainly a rules file (directives, no markup) is
+ * appended to like any other; only actual HTML gets replaced.
+ */
+const looksLikeRules = (body: string): boolean =>
+  !/^\s*(?:<!doctype|<html)/i.test(body) && /^\s*(?:user-agent|disallow|allow|sitemap)\s*:/im.test(body);
+
+/** Does this URL actually exist? One HEAD, and any failure reads as "no". */
+async function headOk(url: string): Promise<boolean> {
+  try {
+    const res = await fetch(url, {
+      method: 'HEAD',
       headers: { 'user-agent': AGENT_UA, accept: '*/*' },
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       redirect: 'follow',
     });
-    return { status: res.status, contentType: res.headers.get('content-type') || '', body: await res.text(), error: null };
-  } catch (err) {
-    return { status: 0, contentType: '', body: '', error: err instanceof Error ? err.message : String(err) };
+    return res.status === 200;
+  } catch {
+    return false;
   }
 }
 
@@ -182,9 +286,12 @@ async function fetchRobots(url: string): Promise<FetchedRobots> {
  *   - a real file (200, not an HTML shell) → append to exactly those bytes, and
  *     journal them as current_value so the reviewer sees a true diff and a
  *     revert has something to restore;
- *   - absent, an HTML soft-404, or unreachable → synthesize a minimal file.
- *     Nothing is being replaced, so there is nothing to preserve; current_value
- *     is null.
+ *   - absent (404/410) or an HTML soft-404 → synthesize a minimal file. Nothing
+ *     is being replaced, so there is nothing to preserve; current_value is null.
+ *   - UNREADABLE (403/5xx/network) → refuse, loudly. This is the case the fix
+ *     must not paper over: a 403 does not mean "no robots.txt", it means we
+ *     could not see one, and synthesizing over a file we failed to read would
+ *     publish a policy that silently deletes rules we never saw.
  *
  * The origin is re-fetched HERE rather than reusing the crawl's copy: the body
  * we append to is the body a reviewer is about to publish over, and a stale one
@@ -193,20 +300,35 @@ async function fetchRobots(url: string): Promise<FetchedRobots> {
 export async function generateRobotsProposal(deps: Pick<AgentDeps, 'db' | 'config' | 'overrides'>) {
   const spec = RESOURCE_FIELDS.get('robots_txt')!;
   const origin = new URL(deps.config.siteUrl).origin;
-  const fetched = await fetchRobots(`${origin}${spec.path}`);
-  const state = fetched.error ? 'error' : classifyTextResource(fetched.status, fetched.contentType, fetched.body);
+  const url = `${origin}${spec.path}`;
+  const classify = (f: FetchedRobots) => (f.error ? 'error' : classifyTextResource(f.status, f.contentType, f.body));
 
-  // A misconfigured origin can serve a perfectly real robots.txt as text/html,
-  // which classifyTextResource calls a soft 404. Synthesizing over that would
-  // DELETE the owner's rules — the one thing this module promises never to do.
-  // So a soft-404 whose body is plainly a rules file (directives, no markup) is
-  // appended to like any other; only actual HTML gets replaced.
-  const looksLikeRules =
-    !/^\s*(?:<!doctype|<html)/i.test(fetched.body) && /^\s*(?:user-agent|disallow|allow|sitemap)\s*:/im.test(fetched.body);
+  let fetched = await fetchRobots(url, AGENT_UA);
+  let state = classify(fetched);
+  if (state === 'error') {
+    // One retry as a browser. The overwhelmingly common cause of a 403 here is
+    // bot management refusing an unfamiliar UA, and a public file we're allowed
+    // to read is worth one second attempt before telling the owner to go fix
+    // their edge. A retry that comes back as an HTML shell is a challenge/login
+    // page, NOT a soft 404 — treating it as one would synthesize over a file we
+    // still haven't read, so it stays an error.
+    const retried = await fetchRobots(url, BROWSER_UA);
+    const retriedState = classify(retried);
+    if (retriedState === 'ok' || retriedState === 'missing' || (retriedState === 'soft_404' && looksLikeRules(retried.body))) {
+      fetched = retried;
+      state = retriedState;
+    } else {
+      const what = retried.error || retried.status === 0 ? 'network error' : `HTTP ${retried.status}`;
+      throw new ApiError(
+        `we couldn't read your robots.txt (${what}) — fix access (it may be blocking our crawler) and try again.`,
+        409
+      );
+    }
+  }
 
   let currentValue: string | null = null;
   let body: string;
-  if (state === 'ok' || (state === 'soft_404' && looksLikeRules)) {
+  if (state === 'ok' || (state === 'soft_404' && looksLikeRules(fetched.body))) {
     currentValue = fetched.body;
     body = appendAiPolicy(fetched.body, ANSWER_ENGINE_BOTS);
     if (body === fetched.body) {
@@ -215,8 +337,13 @@ export async function generateRobotsProposal(deps: Pick<AgentDeps, 'db' | 'confi
   } else {
     // Minimal synthesized file: the allow-all default crawlers already assume,
     // made explicit, plus the sitemap pointer a from-scratch robots.txt should
-    // carry. Sitemap is a non-group field, so it goes after the managed block.
-    body = appendAiPolicy('User-agent: *\nAllow: /\n', ANSWER_ENGINE_BOTS) + `\nSitemap: ${origin}/sitemap.xml\n`;
+    // carry. Sitemap is a non-group field, so it goes after the managed block —
+    // and only when the sitemap is actually THERE. A `Sitemap:` line pointing at
+    // a 404 is a broken promise to every crawler that reads it, and we are
+    // already doing network I/O here, so one HEAD settles it.
+    body = appendAiPolicy('User-agent: *\nAllow: /\n', ANSWER_ENGINE_BOTS);
+    const sitemap = `${origin}/sitemap.xml`;
+    if (await headOk(sitemap)) body += `\nSitemap: ${sitemap}\n`;
   }
 
   console.log(JSON.stringify({ evt: 'robotstxt_proposed', state, bytes: body.length }));

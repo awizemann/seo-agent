@@ -42,6 +42,29 @@ describe('injector resource overrides (llms.txt / llms-full.txt)', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('proxies to the origin when the request asks to bypass resource overrides', async () => {
+    // The agent's generators send this header: they must read the ORIGIN's file
+    // to append to it, not the copy we published over it last time.
+    const kv = fakeKv({ 'resource:/robots.txt': JSON.stringify({ contentType: 'text/plain; charset=utf-8', body: 'ours' }) });
+    const env = { ...baseEnv, SEO_OVERRIDES: kv } as unknown as Env;
+    const req = new Request('https://example.com/robots.txt', { headers: { 'x-seo-agent-bypass': 'resource' } });
+    const res = await worker.fetch(req, env, fakeCtx());
+
+    expect(await res.text()).toBe('origin body');
+    expect(fetchMock).toHaveBeenCalled();
+    expect(kv.get).not.toHaveBeenCalled();
+  });
+
+  it('ignores an unrelated bypass value and still serves the override', async () => {
+    const kv = fakeKv({ 'resource:/robots.txt': JSON.stringify({ contentType: 'text/plain; charset=utf-8', body: 'ours' }) });
+    const env = { ...baseEnv, SEO_OVERRIDES: kv } as unknown as Env;
+    const req = new Request('https://example.com/robots.txt', { headers: { 'x-seo-agent-bypass': 'nonsense' } });
+    const res = await worker.fetch(req, env, fakeCtx());
+
+    expect(await res.text()).toBe('ours');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('proxies to origin when no override exists for an allowlisted path', async () => {
     const kv = fakeKv({});
     const env = { ...baseEnv, SEO_OVERRIDES: kv } as unknown as Env;
