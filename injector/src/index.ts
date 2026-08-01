@@ -13,7 +13,7 @@
  *
  * Resource overrides: the agent also writes `resource:<pathname>` → JSON
  * `{ "contentType", "body" }` for a small, fixed set of well-known paths
- * (RESOURCE_PATHS — currently /llms.txt and /llms-full.txt). A GET/HEAD to
+ * (RESOURCE_PATHS — /llms.txt, /llms-full.txt and /robots.txt). A GET/HEAD to
  * one of those paths checks for a resource override BEFORE contacting the
  * origin; if found, it's served directly (never proxied). No override →
  * normal proxying, so an origin that serves its own llms.txt is never
@@ -32,7 +32,7 @@ type Override = { title?: string; description?: string };
 
 // Fixed allowlist of well-known resource paths — a resource lookup only ever
 // happens for these, so ordinary traffic pays no extra KV/fetch cost.
-const RESOURCE_PATHS = ['/llms.txt', '/llms-full.txt'];
+const RESOURCE_PATHS = ['/llms.txt', '/llms-full.txt', '/robots.txt'];
 
 type ResourceOverride = { contentType: string; body: string };
 

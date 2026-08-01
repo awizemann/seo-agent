@@ -283,7 +283,7 @@ describe('createProposal — llms_txt field gate', () => {
   });
 
   it('still rejects an unknown field', async () => {
-    await expect(createProposal(deps().deps, { path: '/a', field: 'robots_txt', value: BODY }, () => null)).rejects.toThrow(
+    await expect(createProposal(deps().deps, { path: '/a', field: 'canonical', value: BODY }, () => null)).rejects.toThrow(
       /field must be description, title/
     );
   });

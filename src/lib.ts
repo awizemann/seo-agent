@@ -73,6 +73,12 @@ export { analyticsSummary, analyticsPage, analyticsImpact } from './analytics.js
 export { buildLlmsTxt, generateLlmsTxt, createLlmsTxtProposal, LLMS_TXT_MAX_ENTRIES } from './llmstxt.js';
 export type { LlmsTxtPage, LlmsTxtConfig } from './llmstxt.js';
 
+// robots.txt — append an explicit AI-crawler policy to the origin's own file
+// (or synthesize one when it has none) and propose it for approval. Approving
+// publishes `resource:/robots.txt`, which REPLACES the origin's response, so
+// the generator is append-only by construction.
+export { appendAiPolicy, generateRobotsProposal, AI_POLICY_BEGIN, AI_POLICY_END } from './robotstxt.js';
+
 // Resource overrides — the whole-file half of the override layer. The registry
 // pins each field's path and content type, so a host reads it rather than
 // hard-coding key names.

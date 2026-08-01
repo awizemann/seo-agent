@@ -419,7 +419,7 @@ export async function decideProposal(deps: Pick<AgentDeps, 'db' | 'overrides'>, 
     await deps.db.prepare("UPDATE proposals SET status = 'rejected', decided_at = ? WHERE id = ?").bind(now, id).run();
     return { ok: true, id, status: 'rejected' };
   }
-  // Resource fields (llms_txt) publish a whole file to its own KV key; page
+  // Resource fields (llms_txt, robots_txt) publish a whole file to its own KV key; page
   // fields merge into the path's override object. Same journal either way, so
   // approve/revert read identically from the outside.
   const changeId = RESOURCE_FIELDS.has(p.field)

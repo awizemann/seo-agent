@@ -5,7 +5,7 @@
  * approved change is live within the KV cache TTL — no deploy. Every apply
  * and revert lands in the `changes` journal.
  *
- * Site-level FILES (currently /llms.txt) ride the same journal but a different
+ * Site-level FILES (/llms.txt, /robots.txt) ride the same journal but a different
  * key space — `resource:<path>`, holding the whole file — see RESOURCE_FIELDS.
  */
 
@@ -28,6 +28,7 @@ export type ResourceSpec = { path: string; contentType: string };
 
 export const RESOURCE_FIELDS = new Map<string, ResourceSpec>([
   ['llms_txt', { path: '/llms.txt', contentType: 'text/markdown; charset=utf-8' }],
+  ['robots_txt', { path: '/robots.txt', contentType: 'text/plain; charset=utf-8' }],
 ]);
 
 /**

@@ -55,11 +55,32 @@ describe('injector resource overrides (llms.txt / llms-full.txt)', () => {
   it('never performs a resource lookup for a non-allowlisted path', async () => {
     const kv = fakeKv({ 'resource:/llms.txt': JSON.stringify({ contentType: 'text/plain', body: 'x' }) });
     const env = { ...baseEnv, SEO_OVERRIDES: kv } as unknown as Env;
-    const req = new Request('https://example.com/robots.txt');
+    const req = new Request('https://example.com/sitemap.xml');
     await worker.fetch(req, env, fakeCtx());
 
     expect(kv.get).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it('serves a robots.txt override, replacing the origin response entirely', async () => {
+    const body = 'User-agent: *\nAllow: /\n';
+    const kv = fakeKv({ 'resource:/robots.txt': JSON.stringify({ contentType: 'text/plain; charset=utf-8', body }) });
+    const env = { ...baseEnv, SEO_OVERRIDES: kv } as unknown as Env;
+    const res = await worker.fetch(new Request('https://example.com/robots.txt'), env, fakeCtx());
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('text/plain; charset=utf-8');
+    expect(await res.text()).toBe(body);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('proxies robots.txt to the origin when no override is published', async () => {
+    const kv = fakeKv({});
+    const env = { ...baseEnv, SEO_OVERRIDES: kv } as unknown as Env;
+    const res = await worker.fetch(new Request('https://example.com/robots.txt'), env, fakeCtx());
+
+    expect(fetchMock).toHaveBeenCalled();
+    expect(await res.text()).toBe('origin body');
   });
 
   it('fails open and proxies to origin on malformed override JSON', async () => {
