@@ -16,7 +16,9 @@
 // Config — the site profile, as data.
 // ---------------------------------------------------------------------------
 export type { SiteConfig, SiteVarEnv } from './config.js';
-export { resolveSiteConfig, siteConfigFromEnv } from './config.js';
+// findBannedTerm is exported so a host embedding the library can pre-check copy
+// against the same matcher the agent enforces, instead of reimplementing \b.
+export { resolveSiteConfig, siteConfigFromEnv, parseTerms, findBannedTerm } from './config.js';
 
 // ---------------------------------------------------------------------------
 // Deps — bindings + config + secrets, as data.

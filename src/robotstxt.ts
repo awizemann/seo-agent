@@ -10,6 +10,14 @@
  * serves survives verbatim — the only new bytes are a clearly delimited block at
  * the end (or, on regeneration, in place of the block we wrote last time).
  *
+ * No banned-terms check here, unlike llms.txt. BANNED_TERMS is a vocabulary
+ * rule for PROSE the agent writes or assembles; robots.txt is neither. Its
+ * content is directives and user-agent tokens — bot and vendor names the owner
+ * does not choose and cannot rewrite — plus whatever the origin already served,
+ * which this module is contractually forbidden to alter. Banning a word that
+ * happens to appear in a crawler's name would block the one fix that resolves
+ * `robots_no_ai_policy`, for no editorial gain.
+ *
  * Removing an existing `Disallow` is explicitly NOT in scope (that's the
  * `robots_blocks_ai_bot` finding, a different and much riskier fix): a bot the
  * file already names, allow or deny, is left exactly as the owner wrote it.

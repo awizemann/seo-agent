@@ -605,6 +605,8 @@ default or is optional. See `wrangler.example.jsonc` for the annotated template.
 | `AGENT_TOKEN` (secret) | ✓ | Bearer token gating the API, MCP endpoint, and dashboard |
 | `SITE_NAME` (var) | | Brand/site name for the AI prompt (defaults to the hostname) |
 | `SITE_DESCRIPTION` (var) | | One clause describing the site, woven into the drafting prompt |
+| `DRAFTING_GUIDANCE` (var) | | House style, woven into the drafting prompt after the description. Write it in positive form ("Refer to the company as Acme") |
+| `BANNED_TERMS` (var) | | Words a draft must never contain (JSON array or comma-separated). Checked *after* generation, case-insensitively on word boundaries; a hit invalidates the draft and the model is asked once to redo it. Also 409s a generated llms.txt whose page content contains one |
 | `AI_MODEL` (var) | | Workers AI text model for proposals |
 | `AUTO_APPLY_FIELDS` (var) | | Fields that may apply without approval; empty = approval required |
 | `MAX_PROPOSALS_PER_RUN` (var) | | Cap on AI drafts per run |

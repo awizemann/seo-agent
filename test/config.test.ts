@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveSiteConfig } from '../src/config';
+import { resolveSiteConfig, findBannedTerm } from '../src/config';
 
 const MIN = { SITE_URL: 'https://www.example.com/' };
 
@@ -135,5 +135,73 @@ describe('PAGE_CAP', () => {
     expect(resolveSiteConfig({ ...base, PAGE_CAP: '100' }).pageCap).toBe(100);
     expect(resolveSiteConfig({ ...base, PAGE_CAP: '1' }).pageCap).toBe(1);
     expect(resolveSiteConfig({ ...base, PAGE_CAP: '99999' }).pageCap).toBe(2000);
+  });
+});
+
+describe('DRAFTING_GUIDANCE / BANNED_TERMS', () => {
+  const base = { SITE_URL: 'https://example.com' };
+
+  it('defaults to no guidance and no terms', () => {
+    const c = resolveSiteConfig(base);
+    expect(c.draftingGuidance).toBe('');
+    expect(c.bannedTerms).toEqual([]);
+    expect(resolveSiteConfig({ ...base, DRAFTING_GUIDANCE: '   ', BANNED_TERMS: '  ' }).bannedTerms).toEqual([]);
+  });
+
+  it('trims the guidance but otherwise keeps it verbatim', () => {
+    expect(resolveSiteConfig({ ...base, DRAFTING_GUIDANCE: '  Refer to the company as Acme.  ' }).draftingGuidance).toBe(
+      'Refer to the company as Acme.'
+    );
+  });
+
+  it('parses BANNED_TERMS as a JSON array', () => {
+    expect(resolveSiteConfig({ ...base, BANNED_TERMS: '["Widgetron", " best in class "]' }).bannedTerms).toEqual([
+      'Widgetron',
+      'best in class',
+    ]);
+  });
+
+  it('parses BANNED_TERMS as comma- or newline-separated text', () => {
+    expect(resolveSiteConfig({ ...base, BANNED_TERMS: 'Widgetron, best in class ,  ' }).bannedTerms).toEqual(['Widgetron', 'best in class']);
+    expect(resolveSiteConfig({ ...base, BANNED_TERMS: 'Widgetron\nAcme Corp' }).bannedTerms).toEqual(['Widgetron', 'Acme Corp']);
+  });
+
+  it('falls back to separator parsing when the JSON is malformed', () => {
+    expect(resolveSiteConfig({ ...base, BANNED_TERMS: '["Widgetron", ' }).bannedTerms).toEqual(['["Widgetron"']);
+  });
+});
+
+describe('findBannedTerm', () => {
+  it('returns null for no text, no terms, or no hit', () => {
+    expect(findBannedTerm('', ['a'])).toBeNull();
+    expect(findBannedTerm('some text', [])).toBeNull();
+    expect(findBannedTerm('some text', undefined)).toBeNull();
+    expect(findBannedTerm('some text', ['other'])).toBeNull();
+  });
+
+  it('returns the FIRST listed term that matches, in list order', () => {
+    expect(findBannedTerm('alpha and beta', ['beta', 'alpha'])).toBe('beta');
+    expect(findBannedTerm('alpha and beta', ['gamma', 'alpha'])).toBe('alpha');
+  });
+
+  it('is boundary-anchored and case-insensitive', () => {
+    expect(findBannedTerm('we maintain things', ['ai'])).toBeNull();
+    expect(findBannedTerm('we use AI here', ['ai'])).toBe('ai');
+    expect(findBannedTerm('Widgetronic', ['Widgetron'])).toBeNull();
+  });
+
+  it('documents the ASCII \\b limit honestly rather than pretending it is not there', () => {
+    // Against ASCII text the boundary does its job, and a non-ASCII term is
+    // still found on its own and not inside a longer word.
+    expect(findBannedTerm('cafeteria', ['cafe'])).toBeNull();
+    expect(findBannedTerm('a café serves', ['café'])).toBe('café');
+    expect(findBannedTerm('cafés everywhere', ['café'])).toBeNull();
+    // The limit: \w is ASCII-only, so a diacritic reads as a word boundary and
+    // an ASCII term can end at one and count as a whole word: "na" is a
+    // fragment of "naïve", but ï is a non-word character, so \b holds and the
+    // term is flagged. Acceptable for brand/competitor lists, and it errs
+    // toward over-flagging rather than toward letting a term slip through.
+    expect(findBannedTerm('a naïve approach', ['na'])).toBe('na');
+    expect(findBannedTerm('a naive approach', ['na'])).toBeNull();
   });
 });

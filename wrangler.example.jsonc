@@ -49,6 +49,22 @@
     "SITE_NAME": "Example",
     "SITE_DESCRIPTION": "a description of the site, woven into the AI drafting prompt",
 
+    // House style, woven into the drafting prompt as its own paragraph after
+    // SITE_DESCRIPTION. Write it in POSITIVE form — say what you want written,
+    // not what you forbid: "Refer to the company as Acme. Write 'partner'
+    // where you would write 'client'." Empty (the default) leaves the prompt
+    // untouched. Keep it to a few sentences; long constraint lists measurably
+    // degrade the writing.
+    "DRAFTING_GUIDANCE": "",
+    // Words a draft must never contain — the enforcement half of the pair
+    // above. Checked AFTER generation (case-insensitive, on word boundaries,
+    // so "AI" does not flag "maintain"), because a model told "never say X"
+    // still says X: a hit invalidates the draft and the model is asked once to
+    // redo it. Also checked against generated llms.txt bodies, where a hit is a
+    // 409 naming the term (that text comes from your own pages, so only you can
+    // fix it). A JSON array, or comma-separated text. Empty = no check.
+    "BANNED_TERMS": "",
+
     // --- Google Search Console (optional; sensing is dormant without the SA secret) ---
     // Domain property: "sc-domain:example.com". URL-prefix property: the full URL.
     "GSC_PROPERTY": "sc-domain:example.com",

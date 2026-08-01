@@ -35,6 +35,22 @@ export type SiteConfig = {
   autoApplyFields: string[];
   /** Search Console property (e.g. "sc-domain:example.com"). "" when GSC is not configured. */
   gscProperty: string;
+  /**
+   * Freeform POSITIVE-form drafting guidance, woven into the AI prompt as its
+   * own paragraph after the site description — "Refer to the company as Acme.
+   * Write 'partner' where you would write 'client'." "" leaves the prompt
+   * exactly as it was. Say what you WANT written; the prohibitions belong in
+   * bannedTerms, which is checked deterministically rather than asked for.
+   */
+  draftingGuidance: string;
+  /**
+   * Words/phrases a draft must not contain. Checked AFTER generation
+   * (case-insensitive, on word boundaries) rather than only asked for in the
+   * prompt — a model told "never say X" still says X. A hit makes the draft
+   * invalid, which feeds the existing one-retry-with-reason loop. Keep the
+   * list tight: long constraint lists measurably degrade the writing.
+   */
+  bannedTerms: string[];
   /** Max sitemap URLs crawled per run, clamped to [1, 2000]. Unset/invalid = 2000 (the historical cap). */
   pageCap: number;
   /** Citation-probe settings; engine enablement stays key-derived in citations.ts. */
@@ -62,6 +78,67 @@ export function parseQueries(raw: string): string[] {
     }
   }
   return t.split(/\||\n/).map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * BANNED_TERMS accepts a JSON array or comma- / newline-separated text — the
+ * same two-shape tolerance as CITATION_QUERIES, with the comma as the separator
+ * because a banned term is a word or short phrase, not a sentence containing
+ * commas. Duplicates and casing are irrelevant to the matcher, so neither is
+ * normalized away here; empty entries are dropped.
+ */
+export function parseTerms(raw: string): string[] {
+  const t = (raw || '').trim();
+  if (!t) return [];
+  if (t.startsWith('[')) {
+    try {
+      const a = JSON.parse(t);
+      if (Array.isArray(a)) return a.map(String).map((s) => s.trim()).filter(Boolean);
+    } catch {
+      // fall through to separator parsing
+    }
+  }
+  return t.split(/,|\n/).map((s) => s.trim()).filter(Boolean);
+}
+
+// Characters that would otherwise make a user-supplied term a regex of its own.
+const REGEX_META = /[.*+?^${}()|[\]\\]/g;
+
+/**
+ * The first banned term appearing in `text`, or null. Case-insensitive and
+ * boundary-anchored, so banning "AI" does not flag "maintain".
+ *
+ * The boundary is chosen per side: \b only exists between a word and a
+ * non-word character, so a term like "C++" (ending in punctuation) would never
+ * match with a trailing \b. Terms starting/ending in a word character get \b;
+ * the other sides get a "not adjacent to a word character" lookaround.
+ *
+ * KNOWN LIMIT: JavaScript's \w — and therefore \b — is ASCII-only. A term with
+ * diacritics or non-Latin script ("café", "北京") still matches as a substring,
+ * but its boundary check degrades: "café" is not flagged inside "cafés" the way
+ * an ASCII term would be, because é already counts as a non-word character.
+ * Unicode-property boundaries would fix this at the cost of a far subtler
+ * regex; for a vocabulary list of brand and competitor names this is the honest
+ * trade, not a silent one.
+ */
+export function findBannedTerm(text: string, terms: string[] | undefined): string | null {
+  if (!text || !terms || terms.length === 0) return null;
+  for (const raw of terms) {
+    const term = (raw ?? '').trim();
+    if (!term) continue;
+    const left = /^\w/.test(term) ? '\\b' : '(?<!\\w)';
+    const right = /\w$/.test(term) ? '\\b' : '(?!\\w)';
+    // The escape makes construction safe for every practical term; the catch is
+    // a backstop so one exotic entry can never throw a crawl or a draft away.
+    let re: RegExp;
+    try {
+      re = new RegExp(left + term.replace(REGEX_META, '\\$&') + right, 'i');
+    } catch {
+      continue;
+    }
+    if (re.test(text)) return term;
+  }
+  return null;
 }
 
 /**
@@ -101,6 +178,8 @@ export function resolveSiteConfig(vars: Record<string, string | undefined>): Sit
     maxProposalsPerRun: Math.max(0, parseInt(vars.MAX_PROPOSALS_PER_RUN ?? '', 10) || 0),
     autoApplyFields: (vars.AUTO_APPLY_FIELDS || '').split(',').map((f) => f.trim()).filter(Boolean),
     gscProperty: vars.GSC_PROPERTY || '',
+    draftingGuidance: (vars.DRAFTING_GUIDANCE || '').trim(),
+    bannedTerms: parseTerms(vars.BANNED_TERMS ?? ''),
     pageCap: (() => {
       const n = parseInt(vars.PAGE_CAP ?? '', 10);
       return Number.isInteger(n) && n > 0 ? Math.min(n, 2000) : 2000;
@@ -137,6 +216,8 @@ export type SiteVarEnv = {
   MAX_PROPOSALS_PER_RUN?: string;
   AUTO_APPLY_FIELDS?: string;
   GSC_PROPERTY?: string;
+  DRAFTING_GUIDANCE?: string;
+  BANNED_TERMS?: string;
   PAGE_CAP?: string;
   CITATION_QUERIES?: string;
   CITATION_CRON_DAY?: string;
@@ -162,6 +243,8 @@ export function siteConfigFromEnv(e: SiteVarEnv): SiteConfig {
     MAX_PROPOSALS_PER_RUN: e.MAX_PROPOSALS_PER_RUN,
     AUTO_APPLY_FIELDS: e.AUTO_APPLY_FIELDS,
     GSC_PROPERTY: e.GSC_PROPERTY,
+    DRAFTING_GUIDANCE: e.DRAFTING_GUIDANCE,
+    BANNED_TERMS: e.BANNED_TERMS,
     PAGE_CAP: e.PAGE_CAP,
     CITATION_QUERIES: e.CITATION_QUERIES,
     CITATION_CRON_DAY: e.CITATION_CRON_DAY,

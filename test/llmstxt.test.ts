@@ -432,6 +432,33 @@ describe('generateLlmsTxt / createLlmsTxtProposal', () => {
     expect(r.body).toBe('# Example\n> A site about examples.\n\n## Pages\n');
   });
 
+  // BANNED_TERMS on derived content: nothing here was written by a model, so
+  // there is no retry that could fix it — the only honest outcome is a 409
+  // naming the term and the page it came from.
+  const banned = (d: any, terms: string[]) => ({ ...d, config: { ...config, bannedTerms: terms } });
+
+  it('409s when a page title puts a banned term into the generated body', async () => {
+    const d = deps({ runs: [{ id: 1, ok: 1 }], snapshots: snaps(1, [{ path: '/a', title: 'The Widgetron Guide' }]) });
+    const err = await generateLlmsTxt(banned(d.deps, ['Widgetron'])).catch((e) => e as ApiError);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(409);
+    expect((err as ApiError).message).toBe(
+      'generated llms.txt contains banned term "Widgetron" (from your page content) — fix the source page or remove the term'
+    );
+  });
+
+  it('409s from a page description too, and blocks the proposal entirely', async () => {
+    const d = deps({ runs: [{ id: 1, ok: 1 }], snapshots: snaps(1, [{ path: '/a', title: 'A', description: 'Best in class widgets.' }]) });
+    await expect(createLlmsTxtProposal(banned(d.deps, ['best in class']))).rejects.toThrow(/banned term "best in class"/);
+    expect(d.tables.proposals).toHaveLength(0);
+  });
+
+  it('does not fire on a mere substring — the same word boundary as drafts', async () => {
+    const d = deps({ runs: [{ id: 1, ok: 1 }], snapshots: snaps(1, [{ path: '/a', title: 'How we maintain the index' }]) });
+    const r = await generateLlmsTxt(banned(d.deps, ['AI']));
+    expect(r.entries).toBe(1);
+  });
+
   it('creates a proposal carrying the generated body and the live current value', async () => {
     const live = JSON.stringify({ contentType: 'text/markdown; charset=utf-8', body: 'live body' });
     const d = deps({ runs: [{ id: 1, ok: 1 }], snapshots: snaps(1, [{ path: '/a', title: 'A' }]) }, { [resourceKey('/llms.txt')]: live });

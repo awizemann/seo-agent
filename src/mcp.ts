@@ -121,7 +121,9 @@ const TOOLS: Tool[] = [
       },
       required: ['path', 'value'],
     },
-    handler: (deps, a) => createProposal(deps, a, invalidReason),
+    // Same validator as the HTTP lane, banned terms included — an MCP client is
+    // just another way to hand-write a proposal.
+    handler: (deps, a) => createProposal(deps, a, (t) => invalidReason(t, deps.config)),
   },
   {
     name: 'dry_run_draft',

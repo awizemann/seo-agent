@@ -15,6 +15,7 @@
 
 import { createProposal, ApiError } from './actions.js';
 import { RESOURCE_FIELDS, readResource } from './overrides.js';
+import { findBannedTerm } from './config.js';
 import type { SiteConfig } from './config.js';
 import type { AgentDeps } from './deps.js';
 
@@ -130,6 +131,19 @@ export async function generateLlmsTxt(
       .all<LlmsTxtPage>()
   ).results;
   const body = buildLlmsTxt(rows, deps.config);
+  // The banned-terms gate, applied to DERIVED content. Unlike a draft, nothing
+  // here was written by a model, so there is no retry that could fix it: every
+  // word in the body came off a page the site itself serves. The honest move is
+  // to fail loudly and name the term, so the operator knows to fix the source
+  // page (or drop the term) — silently stripping it would publish an index whose
+  // labels no longer match the pages they link to.
+  const banned = findBannedTerm(body, deps.config.bannedTerms);
+  if (banned) {
+    throw new ApiError(
+      `generated llms.txt contains banned term "${banned}" (from your page content) — fix the source page or remove the term`,
+      409
+    );
+  }
   // Count entries off the rendered body rather than re-applying the filters
   // here — buildLlmsTxt stays the single place that decides what is listed, and
   // its sanitizing means only a real entry can start a line with "- [".

@@ -7,6 +7,7 @@
  */
 
 import { applyOverride } from './overrides.js';
+import { findBannedTerm } from './config.js';
 import type { SiteConfig } from './config.js';
 import type { AgentDeps } from './deps.js';
 
@@ -52,10 +53,30 @@ function extractText(out: unknown): string {
   return '';
 }
 
-const systemPrompt = (cfg: SiteConfig): string =>
-  `You write meta descriptions for ${cfg.siteName} (${cfg.siteUrl}), ${cfg.siteDescription}.
-Voice: plain, confident, direct. No hype, no buzzwords, no exclamation marks, no emoji, no quotation marks.
-Output ONLY the meta description text: one or two complete sentences, between 100 and 158 characters total, ending with a period.`;
+/**
+ * The site owner's DRAFTING_GUIDANCE, flattened to a single line. The var is
+ * freeform text from the site's own operator, so it is their prompt to shape —
+ * but it must not restructure the message it lands in: collapsing every
+ * whitespace run means it stays one paragraph and cannot forge the blank-line
+ * breaks the rest of the system prompt uses to separate its own instructions.
+ * (It is still only ever a `content` string on one message, so it cannot invent
+ * a new role turn, and it is interpolated nowhere but here — no other config
+ * field is built from it.)
+ */
+const guidanceLine = (cfg: SiteConfig): string => (cfg.draftingGuidance || '').replace(/\s+/g, ' ').trim();
+
+const systemPrompt = (cfg: SiteConfig): string => {
+  const guidance = guidanceLine(cfg);
+  return [
+    `You write meta descriptions for ${cfg.siteName} (${cfg.siteUrl}), ${cfg.siteDescription}.`,
+    ...(guidance ? [`House style for this site: ${guidance}`] : []),
+    'Voice: plain, confident, direct. No hype, no buzzwords, no exclamation marks, no emoji, no quotation marks.',
+    'Output ONLY the meta description text: one or two complete sentences, between 100 and 158 characters total, ending with a period.',
+  ].join('\n');
+};
+
+/** Exported for tests: the exact system prompt a config produces. */
+export const buildSystemPrompt = systemPrompt;
 
 function sanitize(raw: string): string {
   return raw
@@ -66,10 +87,26 @@ function sanitize(raw: string): string {
     .trim();
 }
 
-export function invalidReason(text: string): string | null {
+/**
+ * Why a description is unusable, or null.
+ *
+ * `config` is OPTIONAL and second so every existing caller — this is exported
+ * and passed by reference as createProposal's validator — keeps working
+ * unchanged; without it there is no banned-term check at all, which is exactly
+ * the pre-1.13 behavior.
+ *
+ * Order is deliberate: the shape checks (length, sentence) run first, so a
+ * draft that is both malformed and off-vocabulary is corrected on its most
+ * mechanical fault first and the retry loop still gets one reason at a time.
+ * A term hit is reported last but is equally fatal — a 120-char sentence
+ * naming a competitor is invalid no matter how well-formed it is.
+ */
+export function invalidReason(text: string, config?: Pick<SiteConfig, 'bannedTerms'>): string | null {
   if (text.length < VALUE_MIN) return `too short (${text.length} chars, need ${VALUE_MIN}+)`;
   if (text.length > VALUE_MAX) return `too long (${text.length} chars, max ${VALUE_MAX})`;
   if (!/[.!?]$/.test(text)) return 'must end with a complete sentence';
+  const banned = findBannedTerm(text, config?.bannedTerms);
+  if (banned) return `contains banned term "${banned}"`;
   return null;
 }
 
@@ -127,7 +164,10 @@ export async function draftWithTrace(
     }
     const raw = extractText(out);
     const text = sanitize(raw);
-    const reason = text ? invalidReason(text) : 'empty output';
+    // Inside the loop, so the RETRY's output is term-checked exactly as hard as
+    // the first draft — a model that swaps one banned term for another still
+    // fails, and the draft is dropped rather than published.
+    const reason = text ? invalidReason(text, cfg) : 'empty output';
     trace.push({ rawShape: JSON.stringify(out)?.slice(0, 400) ?? '', raw, sanitized: text, reason });
     if (!reason) return { value: text, trace };
     messages.push({ role: 'assistant', content: raw });

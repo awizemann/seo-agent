@@ -118,7 +118,11 @@ export default {
       // through the same validation, approval gate, and journal as AI drafts.
       if (method === 'POST' && pathname === '/proposals') {
         const body = await parseJsonBody<{ path?: string; field?: string; value?: string; rationale?: string }>(request);
-        return json(await createProposal(deps, body, invalidReason));
+        // Hand-written copy (and the dashboard's "promote this dry-run draft"
+        // button, which posts here) meets the same vocabulary bar as an AI
+        // draft — deps.config is in hand, so there is no reason for the manual
+        // lane to be the lenient one.
+        return json(await createProposal(deps, body, (t) => invalidReason(t, deps.config)));
       }
 
       // Diagnostics: run the AI draft for one page and return raw output +
