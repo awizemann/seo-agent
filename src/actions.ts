@@ -7,7 +7,8 @@
 import { runCrawl, prunePageSnapshots } from './crawl.js';
 import { runRules, validateTitle, type Triggered } from './rules.js';
 import { aeoChecks } from './aeo.js';
-import { enqueueCandidates, draftWithTrace, PROPOSABLE_RULES } from './propose.js';
+import { enqueueCandidates, draftWithTrace, invalidReason, PROPOSABLE_RULES } from './propose.js';
+import { findBannedTerm, type SiteConfig } from './config.js';
 import { ingestGsc } from './gsc.js';
 import { applyOverride, applyResource, revertChange, RESOURCE_FIELDS, RESOURCE_MAX_CHARS } from './overrides.js';
 import { telemetrySummary, telemetryFindings, pruneTelemetry, rollupTelemetryWeekly, listCrawlerHits as telemetryHits } from './telemetry.js';
@@ -405,7 +406,47 @@ export async function listProposals(deps: Pick<AgentDeps, 'db'>, status = 'propo
   return rows.results;
 }
 
-export async function decideProposal(deps: Pick<AgentDeps, 'db' | 'overrides'>, id: number, action: 'approve' | 'reject') {
+/**
+ * Why an already-drafted proposal must not be applied NOW, or null.
+ *
+ * A draft is written once and approved later — possibly after the site's
+ * vocabulary changed. Generation-time validation cannot see that future, so
+ * approval re-checks the value against the CURRENT config: otherwise banning a
+ * term leaves every draft that already contains it approvable, and the ban is a
+ * promise the system quietly breaks.
+ *
+ * Scoped to the banned-term rule on purpose. With no banned terms configured
+ * this is a no-op (the historical behavior), so approval can never start
+ * failing on a shape rule — length, sentence form — that was already enforced
+ * when the draft was created.
+ *
+ * `description` runs the full validator (it is the field invalidReason is
+ * written for); every other field — `title` and the whole-file resource fields
+ * — gets the deterministic term match on its text. A resource body is a whole
+ * file rather than a sentence, but a banned name inside it is published to the
+ * open web just the same, so the check is worth its one regex pass.
+ */
+export function approvalBlockedReason(
+  p: { field: string; proposed_value: string },
+  config?: Pick<SiteConfig, 'bannedTerms'>
+): string | null {
+  if (!config?.bannedTerms?.length) return null;
+  const detail =
+    p.field === 'description'
+      ? invalidReason(p.proposed_value, config)
+      : (() => {
+          const banned = findBannedTerm(p.proposed_value, config.bannedTerms);
+          return banned ? `contains banned term "${banned}"` : null;
+        })();
+  if (!detail) return null;
+  return `this draft is no longer valid under the site's current vocabulary: ${detail}. Reject it and draft again.`;
+}
+
+export async function decideProposal(
+  deps: Pick<AgentDeps, 'db' | 'overrides'> & Partial<Pick<AgentDeps, 'config'>>,
+  id: number,
+  action: 'approve' | 'reject'
+) {
   const p = await deps.db.prepare("SELECT * FROM proposals WHERE id = ? AND status = 'proposed'").bind(id).first<{
     id: number;
     path: string;
@@ -419,6 +460,10 @@ export async function decideProposal(deps: Pick<AgentDeps, 'db' | 'overrides'>, 
     await deps.db.prepare("UPDATE proposals SET status = 'rejected', decided_at = ? WHERE id = ?").bind(now, id).run();
     return { ok: true, id, status: 'rejected' };
   }
+  // Re-validate against the CURRENT config before anything is published: the
+  // draft may predate a vocabulary change (see approvalBlockedReason).
+  const stale = approvalBlockedReason(p, deps.config);
+  if (stale) throw new ApiError(stale, 409);
   // Resource fields (llms_txt, robots_txt) publish a whole file to its own KV key; page
   // fields merge into the path's override object. Same journal either way, so
   // approve/revert read identically from the outside.
@@ -444,7 +489,7 @@ export async function decideProposal(deps: Pick<AgentDeps, 'db' | 'overrides'>, 
 }
 
 export async function createProposal(
-  deps: Pick<AgentDeps, 'db'>,
+  deps: Pick<AgentDeps, 'db'> & Partial<Pick<AgentDeps, 'config'>>,
   args: { path?: string; field?: string; value?: string; rationale?: string; currentValue?: string | null },
   validateDescription: (text: string) => string | null
 ) {
@@ -479,6 +524,13 @@ export async function createProposal(
     // Title proposals previously bypassed all validation.
     const reason = validateTitle(args.value);
     if (reason) throw new ApiError(`invalid title: ${reason}`, 400);
+    // Banned terms are a property of the SITE, not of the description field:
+    // a title is published to the same open web. The description path gets this
+    // through its injected validator (which closes over deps.config); titles
+    // have no validator argument, so the check reads config off deps directly —
+    // and stays dormant on a caller that passes no config.
+    const banned = findBannedTerm(args.value, deps.config?.bannedTerms);
+    if (banned) throw new ApiError(`invalid title: contains banned term "${banned}"`, 400);
   }
   // A resource's current value lives in KV, not in a page snapshot, so the
   // caller supplies it (createLlmsTxtProposal reads it); page fields keep

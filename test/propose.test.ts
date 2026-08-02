@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { invalidReason, buildSystemPrompt, draftWithTrace } from '../src/propose';
-import { createProposal, ApiError } from '../src/actions';
+import { approvalBlockedReason, createProposal, decideProposal, ApiError } from '../src/actions';
 import { resolveSiteConfig } from '../src/config';
 
 const cfg = (vars: Record<string, string> = {}) => resolveSiteConfig({ SITE_URL: 'https://example.com', ...vars });
@@ -208,5 +208,114 @@ describe('createProposal — manual copy meets the same vocabulary bar', () => {
   it('still accepts it when the caller passes the bare validator (no config)', async () => {
     const { deps } = fakeDeps();
     expect(await createProposal(deps, { path: '/a', value: DIRTY }, invalidReason)).toMatchObject({ ok: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Titles: the same vocabulary bar, and approval re-checks a stale draft.
+// A draft is written once and approved later — the vocabulary can change in
+// between, and generation-time validation cannot see that future.
+// ---------------------------------------------------------------------------
+
+const TITLE_CLEAN = 'A plain index of the pages answer engines read';
+const TITLE_DIRTY = 'The Widgetron index answer engines read';
+
+describe('createProposal — title field', () => {
+  it('rejects a title containing a banned term when deps carries config', async () => {
+    const { deps, proposals } = fakeDeps();
+    deps.config = cfg({ BANNED_TERMS: 'Widgetron' });
+    const err = await createProposal(deps, { path: '/a', field: 'title', value: TITLE_DIRTY }, () => null).catch((e) => e as ApiError);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(400);
+    expect((err as ApiError).message).toBe('invalid title: contains banned term "Widgetron"');
+    expect(proposals).toHaveLength(0);
+  });
+
+  it('accepts the clean title through the same path', async () => {
+    const { deps, proposals } = fakeDeps();
+    deps.config = cfg({ BANNED_TERMS: 'Widgetron' });
+    expect(await createProposal(deps, { path: '/a', field: 'title', value: TITLE_CLEAN }, () => null)).toMatchObject({ ok: true });
+    expect(proposals).toHaveLength(1);
+  });
+
+  it('stays dormant when the caller passes no config', async () => {
+    const { deps } = fakeDeps();
+    expect(await createProposal(deps, { path: '/a', field: 'title', value: TITLE_DIRTY }, () => null)).toMatchObject({ ok: true });
+  });
+});
+
+describe('approvalBlockedReason', () => {
+  const banned = cfg({ BANNED_TERMS: 'Widgetron' });
+
+  it('is a no-op with no config or no banned terms — nothing starts failing', () => {
+    expect(approvalBlockedReason({ field: 'description', proposed_value: DIRTY })).toBeNull();
+    expect(approvalBlockedReason({ field: 'description', proposed_value: DIRTY }, cfg())).toBeNull();
+    // A shape-invalid value is NOT re-judged when no vocabulary is configured.
+    expect(approvalBlockedReason({ field: 'description', proposed_value: 'tiny' }, cfg())).toBeNull();
+  });
+
+  it('names the term for a description, a title and a resource body alike', () => {
+    for (const field of ['description', 'title', 'llms_txt', 'robots_txt']) {
+      expect(approvalBlockedReason({ field, proposed_value: DIRTY }, banned)).toMatch(/banned term "Widgetron"/);
+    }
+  });
+
+  it('passes clean values in every field', () => {
+    expect(approvalBlockedReason({ field: 'description', proposed_value: CLEAN }, banned)).toBeNull();
+    expect(approvalBlockedReason({ field: 'title', proposed_value: TITLE_CLEAN }, banned)).toBeNull();
+    expect(approvalBlockedReason({ field: 'llms_txt', proposed_value: '# Example\n- [A](https://example.com/a)\n' }, banned)).toBeNull();
+  });
+});
+
+describe('decideProposal — approving a draft that predates a vocabulary change', () => {
+  // Minimal proposal store: enough for the decide path (select, then the
+  // status update that must NOT happen on a blocked approval).
+  const store = (row: Record<string, unknown>) => {
+    const proposals = [{ id: 1, status: 'proposed', current_value: null, ...row }];
+    const stmt = (sql: string, binds: unknown[] = []): any => ({
+      bind: (...b: unknown[]) => stmt(sql, b),
+      first: async () => (/SELECT \* FROM proposals WHERE id = \? AND status = 'proposed'/.test(sql)
+        ? proposals.find((p) => p.id === binds[0] && p.status === 'proposed') ?? null
+        : null),
+      all: async () => ({ results: [] }),
+      run: async () => {
+        if (/UPDATE proposals SET status = 'rejected'/.test(sql)) proposals[0].status = 'rejected';
+        if (/UPDATE proposals SET status = 'approved'/.test(sql)) proposals[0].status = 'approved';
+        return {};
+      },
+    });
+    const overrides = { get: async () => null, put: async () => {}, delete: async () => {} };
+    return { proposals, deps: { db: { prepare: (sql: string) => stmt(sql) }, overrides } as any };
+  };
+  const banned = cfg({ BANNED_TERMS: 'Widgetron' });
+
+  it('409s instead of publishing a description that is now banned', async () => {
+    const s = store({ path: '/a', field: 'description', proposed_value: DIRTY });
+    s.deps.config = banned;
+    const err = await decideProposal(s.deps, 1, 'approve').catch((e) => e as ApiError);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(409);
+    expect((err as ApiError).message).toMatch(/banned term "Widgetron"/);
+    expect(s.proposals[0].status).toBe('proposed'); // nothing applied, nothing decided
+  });
+
+  it('409s on a title and on an llms_txt body too', async () => {
+    for (const [field, value] of [['title', TITLE_DIRTY], ['llms_txt', '# Widgetron\n']] as const) {
+      const s = store({ path: field === 'llms_txt' ? '/llms.txt' : '/a', field, proposed_value: value });
+      s.deps.config = banned;
+      await expect(decideProposal(s.deps, 1, 'approve')).rejects.toThrow(/banned term/);
+    }
+  });
+
+  it('REJECTING a now-invalid draft still works — the block is on publishing only', async () => {
+    const s = store({ path: '/a', field: 'description', proposed_value: DIRTY });
+    s.deps.config = banned;
+    expect(await decideProposal(s.deps, 1, 'reject')).toMatchObject({ ok: true, status: 'rejected' });
+  });
+
+  it('approves the clean draft under the same config', async () => {
+    const s = store({ path: '/a', field: 'description', proposed_value: CLEAN });
+    s.deps.config = banned;
+    expect(await decideProposal(s.deps, 1, 'approve')).toMatchObject({ ok: true, status: 'approved' });
   });
 });

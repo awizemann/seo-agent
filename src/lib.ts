@@ -54,6 +54,8 @@ export {
   listProposals,
   createProposal,
   decideProposal,
+  // Why an already-drafted proposal can no longer be applied (vocabulary drift).
+  approvalBlockedReason,
   dryRunDraft,
   // Changes and overrides
   listChanges,
