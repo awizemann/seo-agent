@@ -26,9 +26,74 @@ const OVERRIDE_FIELDS = new Set(['description', 'title']);
  */
 export type ResourceSpec = { path: string; contentType: string };
 
-export const RESOURCE_FIELDS = new Map<string, ResourceSpec>([
+/**
+ * A PATTERN resource: one field covering a FAMILY of paths, each derived from
+ * the proposal's own page path by a rule pinned here (`md_twin` → the page's
+ * `.md` twin). The pinning guarantee is unchanged — a caller still cannot pick
+ * the key, only the page whose twin it is, and `mdTwinPathReason` rejects
+ * anything that isn't a clean root-relative page path.
+ */
+export type PatternResourceSpec = { pathFor(proposalPath: string): string; contentType: string };
+
+/** Either kind of resource. Discriminated by the presence of `pathFor`. */
+export type AnyResourceSpec = ResourceSpec | PatternResourceSpec;
+
+export function isPatternSpec(spec: AnyResourceSpec): spec is PatternResourceSpec {
+  return typeof (spec as PatternResourceSpec).pathFor === 'function';
+}
+
+/**
+ * The spec of a field known to be FIXED-path, for the generators that own one
+ * particular file (llms.txt, robots.txt) and need its path before they have a
+ * proposal. Throws on a pattern field rather than inventing a path for it.
+ */
+export function fixedResourceSpec(field: string): ResourceSpec {
+  const spec = RESOURCE_FIELDS.get(field);
+  if (!spec || isPatternSpec(spec)) throw new Error(`field not a fixed resource: ${field}`);
+  return spec;
+}
+
+/**
+ * The KV path a resource change lands on. Fixed specs answer with their pinned
+ * path and ignore the argument; pattern specs derive it from the page path.
+ */
+export function resourcePathFor(spec: AnyResourceSpec, proposalPath: string): string {
+  return isPatternSpec(spec) ? spec.pathFor(proposalPath) : spec.path;
+}
+
+/**
+ * THE twin-path rule: `/a/b` → `/a/b.md`, `/a/b/` → `/a/b/index.md`. The proxy
+ * injector derives the same path in its markdown lane; it is zero-dependency by
+ * design and cannot import this module, so it MIRRORS this function (see
+ * `twinPath` in injector/src/index.ts) — change one, change the other.
+ */
+export function mdTwinPath(pagePath: string): string {
+  const reason = mdTwinPathReason(pagePath);
+  if (reason) throw new Error(`invalid md_twin path: ${reason}`);
+  return pagePath.endsWith('/') ? `${pagePath}index.md` : `${pagePath}.md`;
+}
+
+/**
+ * Why a page path can't carry a markdown twin, or null. A twin key is derived
+ * from caller-supplied text, so this is the guard that keeps the derivation
+ * inside the site's own page space: root-relative, no traversal, no query or
+ * fragment, and not already a `.md` file (whose twin would be `/x.md.md`).
+ */
+export function mdTwinPathReason(pagePath: string): string | null {
+  if (!pagePath) return 'empty path';
+  if (!pagePath.startsWith('/')) return 'path must be root-relative (start with "/")';
+  if (pagePath.includes('?') || pagePath.includes('#')) return 'path must not contain a query string or fragment';
+  if (pagePath.includes('..')) return 'path must not contain ".."';
+  if (pagePath.includes('//')) return 'path must not contain an empty segment';
+  if (/\.md$/i.test(pagePath)) return 'path is already a .md file';
+  return null;
+}
+
+export const RESOURCE_FIELDS = new Map<string, AnyResourceSpec>([
   ['llms_txt', { path: '/llms.txt', contentType: 'text/markdown; charset=utf-8' }],
+  ['llms_full_txt', { path: '/llms-full.txt', contentType: 'text/markdown; charset=utf-8' }],
   ['robots_txt', { path: '/robots.txt', contentType: 'text/plain; charset=utf-8' }],
+  ['md_twin', { pathFor: mdTwinPath, contentType: 'text/markdown; charset=utf-8' }],
 ]);
 
 /**
@@ -66,14 +131,19 @@ export async function readResource(deps: Pick<AgentDeps, 'overrides'>, path: str
 /**
  * Publish a resource body to KV and journal it, the resource-side twin of
  * applyOverride. `field` must be a known RESOURCE_FIELDS key; the change row's
- * path is the spec's path, so the journal reads the same way as a page change.
+ * path is the resolved resource path, so the journal reads the same way as a
+ * page change — and a revert can key off the row alone. For a PATTERN field the
+ * caller must pass the proposal's page path; the derived twin path is what gets
+ * journalled (`/a/b` proposes, `/a/b.md` is the row and the key).
  */
 export async function applyResource(
   deps: Pick<AgentDeps, 'db' | 'overrides'>,
-  args: { field: string; value: string; source: string; proposalId?: number }
+  args: { field: string; value: string; source: string; proposalId?: number; path?: string }
 ): Promise<number> {
   const spec = RESOURCE_FIELDS.get(args.field);
   if (!spec) throw new Error(`field not a resource: ${args.field}`);
+  if (isPatternSpec(spec) && !args.path) throw new Error(`field ${args.field} requires a path`);
+  const path = resourcePathFor(spec, args.path ?? '');
   // Journal the TRUE prior state — and for a RESOURCE, the only prior state we
   // own is what is live in KV. The proposal's current_value is a snapshot of the
   // ORIGIN's own file, which we never published and must not "restore": the way
@@ -86,16 +156,16 @@ export async function applyResource(
   // (a second approval before any revert) IS ours, and revert restores it.
   // Deliberately unlike applyOverride, whose page fields merge into a value the
   // site itself bakes in, and whose snapshot old_value is meaningful.
-  const oldValue = await readResource(deps, spec.path);
-  await deps.overrides.put(resourceKey(spec.path), JSON.stringify({ contentType: spec.contentType, body: args.value }));
+  const oldValue = await readResource(deps, path);
+  await deps.overrides.put(resourceKey(path), JSON.stringify({ contentType: spec.contentType, body: args.value }));
 
   const now = new Date().toISOString();
   const row = await deps.db.prepare(
     'INSERT INTO changes (applied_at, path, field, old_value, new_value, source, proposal_id) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id'
   )
-    .bind(now, spec.path, args.field, oldValue, args.value, args.source, args.proposalId ?? null)
+    .bind(now, path, args.field, oldValue, args.value, args.source, args.proposalId ?? null)
     .first<{ id: number }>();
-  console.log(JSON.stringify({ evt: 'resource_applied', path: spec.path, field: args.field, source: args.source, bytes: args.value.length }));
+  console.log(JSON.stringify({ evt: 'resource_applied', path, field: args.field, source: args.source, bytes: args.value.length }));
   return row?.id ?? 0;
 }
 
@@ -170,11 +240,13 @@ export async function revertChange(deps: Pick<AgentDeps, 'db' | 'overrides'>, ch
   if (spec) {
     // Resource change: the whole file is the value, so restoring the prior body
     // means rewriting the key — or deleting it when nothing was published
-    // before, letting the origin's own file surface again.
+    // before, letting the origin's own file surface again. The row's path IS
+    // the resolved resource path (applyResource journals it that way), so a
+    // pattern field needs no re-derivation here.
     if (change.old_value != null && change.old_value !== '') {
-      await deps.overrides.put(resourceKey(spec.path), JSON.stringify({ contentType: spec.contentType, body: change.old_value }));
+      await deps.overrides.put(resourceKey(change.path), JSON.stringify({ contentType: spec.contentType, body: change.old_value }));
     } else {
-      await deps.overrides.delete(resourceKey(spec.path));
+      await deps.overrides.delete(resourceKey(change.path));
     }
   } else {
     const current = await readOverride(deps, change.path);

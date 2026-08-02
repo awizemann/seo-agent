@@ -86,8 +86,18 @@ export { appendAiPolicy, generateRobotsProposal, AI_POLICY_BEGIN, AI_POLICY_END 
 // Resource overrides — the whole-file half of the override layer. The registry
 // pins each field's path and content type, so a host reads it rather than
 // hard-coding key names.
-export { RESOURCE_FIELDS, RESOURCE_MAX_CHARS, resourceKey, readResource } from './overrides.js';
-export type { ResourceSpec } from './overrides.js';
+export {
+  RESOURCE_FIELDS,
+  RESOURCE_MAX_CHARS,
+  resourceKey,
+  readResource,
+  isPatternSpec,
+  fixedResourceSpec,
+  resourcePathFor,
+  mdTwinPath,
+  mdTwinPathReason,
+} from './overrides.js';
+export type { ResourceSpec, PatternResourceSpec, AnyResourceSpec } from './overrides.js';
 
 // Drafting — the queue consumer half, and the validator the drafts must pass.
 export { draftAndCreate, invalidReason } from './propose.js';

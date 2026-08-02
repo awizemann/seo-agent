@@ -10,7 +10,7 @@ import { aeoChecks } from './aeo.js';
 import { enqueueCandidates, draftWithTrace, invalidReason, PROPOSABLE_RULES } from './propose.js';
 import { findBannedTerm, type SiteConfig } from './config.js';
 import { ingestGsc } from './gsc.js';
-import { applyOverride, applyResource, revertChange, RESOURCE_FIELDS, RESOURCE_MAX_CHARS } from './overrides.js';
+import { applyOverride, applyResource, revertChange, isPatternSpec, mdTwinPathReason, RESOURCE_FIELDS, RESOURCE_MAX_CHARS } from './overrides.js';
 import { telemetrySummary, telemetryFindings, pruneTelemetry, rollupTelemetryWeekly, listCrawlerHits as telemetryHits } from './telemetry.js';
 import { runCitationProbes, citationFindings, citationConfig, alreadyCheckedToday } from './citations.js';
 import { impactFindings } from './impact.js';
@@ -464,13 +464,16 @@ export async function decideProposal(
   // draft may predate a vocabulary change (see approvalBlockedReason).
   const stale = approvalBlockedReason(p, deps.config);
   if (stale) throw new ApiError(stale, 409);
-  // Resource fields (llms_txt, robots_txt) publish a whole file to its own KV key; page
-  // fields merge into the path's override object. Same journal either way, so
-  // approve/revert read identically from the outside.
+  // Resource fields (llms_txt, llms_full_txt, robots_txt, md_twin) publish a whole file
+  // to its own KV key; page fields merge into the path's override object. Same
+  // journal either way, so approve/revert read identically from the outside.
   const changeId = RESOURCE_FIELDS.has(p.field)
     ? await applyResource(deps, {
         field: p.field,
         value: p.proposed_value,
+        // Only a PATTERN field reads this (md_twin derives its key from the
+        // page path); a fixed field ignores it and uses its pinned path.
+        path: p.path,
         // No oldValue: a resource's prior state is whatever WE published (see
         // applyResource) — the proposal's origin snapshot is not ours to restore.
         source: 'proposal',
@@ -501,9 +504,17 @@ export async function createProposal(
   }
   if (resource) {
     // A resource body is a whole file, not a meta string: the only checks that
-    // generalize are "not blank" and a sanity bound. Its path is pinned by the
-    // field, so a mismatched one is a caller bug, not a second resource.
-    if (args.path !== resource.path) throw new ApiError(`field ${field} is always published at ${resource.path}`, 400);
+    // generalize are "not blank" and a sanity bound. A FIXED field's path is
+    // pinned by the field, so a mismatched one is a caller bug, not a second
+    // resource. A PATTERN field's path is the PAGE the twin belongs to, so the
+    // check is that it is a clean page path — the key is still derived, never
+    // supplied.
+    if (isPatternSpec(resource)) {
+      const reason = mdTwinPathReason(args.path);
+      if (reason) throw new ApiError(`invalid path for ${field}: ${reason}`, 400);
+    } else if (args.path !== resource.path) {
+      throw new ApiError(`field ${field} is always published at ${resource.path}`, 400);
+    }
     if (!args.value.trim()) throw new ApiError(`invalid ${field}: empty after trimming`, 400);
     if (args.value.length > RESOURCE_MAX_CHARS) {
       throw new ApiError(`invalid ${field}: too long (${args.value.length} chars, max ${RESOURCE_MAX_CHARS})`, 400);
@@ -513,9 +524,15 @@ export async function createProposal(
     // the older one's body second (last write wins) and the reviewer has no way
     // to see that from either diff. Page fields don't need this — they're a
     // single meta string, and the newest approval is unambiguously the answer.
-    const open = await deps.db.prepare("SELECT id FROM proposals WHERE field = ? AND status = 'proposed' LIMIT 1")
-      .bind(field)
-      .first<{ id: number }>();
+    // A pattern field has one file PER PAGE, so its uniqueness is per (field,
+    // path); a fixed field's single file makes the path redundant either way.
+    const open = isPatternSpec(resource)
+      ? await deps.db.prepare("SELECT id FROM proposals WHERE field = ? AND path = ? AND status = 'proposed' LIMIT 1")
+          .bind(field, args.path)
+          .first<{ id: number }>()
+      : await deps.db.prepare("SELECT id FROM proposals WHERE field = ? AND status = 'proposed' LIMIT 1")
+          .bind(field)
+          .first<{ id: number }>();
     if (open) throw new ApiError(`a proposal for this file is already awaiting review (#${open.id})`, 409);
   } else if (field === 'description') {
     const reason = validateDescription(args.value);

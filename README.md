@@ -324,6 +324,14 @@ nothing). This project gives you the same behavior on any plan:
   the twin, sending `content-type: text/markdown`, `x-markdown-tokens`,
   `content-signal`, and `Vary: accept`, and falls through to the normal proxy
   when no twin exists.
+- **No twins at your origin? Publish them as resources.** The `md_twin` resource
+  field takes a page path and stores that page's twin at `resource:<path>.md`
+  through the normal propose → approve → apply → revert lifecycle (bodies come
+  from you — the library never generates them). The injector reads a published
+  twin only when the origin has none: on the Accept lane, and on a literal `.md`
+  URL the origin 404s. An origin that emits its own twins is never shadowed, and
+  ordinary traffic pays no extra lookup. `llms_full_txt` is the matching fixed
+  field for `/llms-full.txt`.
 - **Worker-fronted sites** should negotiate directly: on a content route whose
   `Accept` includes `text/markdown`, return the page as markdown from your data
   layer (and serve the same document at `<path>.md`), with the same three

@@ -14,7 +14,7 @@
  */
 
 import { createProposal, ApiError } from './actions.js';
-import { RESOURCE_FIELDS, readResource } from './overrides.js';
+import { fixedResourceSpec, readResource } from './overrides.js';
 import { findBannedTerm } from './config.js';
 import type { SiteConfig } from './config.js';
 import type { AgentDeps } from './deps.js';
@@ -157,7 +157,7 @@ export async function generateLlmsTxt(
  * sees a real diff and a later revert has something to restore.
  */
 export async function createLlmsTxtProposal(deps: Pick<AgentDeps, 'db' | 'config' | 'overrides'>) {
-  const spec = RESOURCE_FIELDS.get('llms_txt')!;
+  const spec = fixedResourceSpec('llms_txt');
   const { body, entries } = await generateLlmsTxt(deps);
   // Publishing a header with an empty page list would tell answer engines the
   // site has nothing — strictly worse than serving no file.

@@ -21,6 +21,12 @@
  * skips that lookup entirely and is proxied to the origin — how the agent reads
  * the origin's real file when regenerating one.
  *
+ * Markdown twins: the agent can also publish `resource:<path>.md` for any page
+ * (the `md_twin` field). The markdown lane consults it only AFTER the origin
+ * declines to serve its own twin, so an origin that generates twins is never
+ * shadowed, and ordinary traffic pays nothing — the lookup happens only on a
+ * request that asked for markdown, or on a literal `.md` URL the origin 404'd.
+ *
  * FAIL-OPEN: any error serves the origin response untouched, so the injector
  * can never take the fronted site down. Zero dependencies.
  *
@@ -32,8 +38,10 @@
 
 type Override = { title?: string; description?: string };
 
-// Fixed allowlist of well-known resource paths — a resource lookup only ever
-// happens for these, so ordinary traffic pays no extra KV/fetch cost.
+// Fixed allowlist of well-known resource paths — a BEFORE-origin resource
+// lookup only ever happens for these, so ordinary traffic pays no extra
+// KV/fetch cost. (Markdown twins are looked up too, but only after the
+// markdown lane triggered or a `.md` URL 404'd at the origin.)
 const RESOURCE_PATHS = ['/llms.txt', '/llms-full.txt', '/robots.txt'];
 
 type ResourceOverride = { contentType: string; body: string };
@@ -214,6 +222,32 @@ function inject(res: Response, o: Override): Response {
 // Default markdown-lane policy header, matching the main site worker's tap.
 const CONTENT_SIGNAL = 'ai-train=yes, search=yes, ai-input=yes';
 
+/**
+ * The twin path for a clean URL: `/a/b` → `/a/b.md`, `/a/b/` → `/a/b/index.md`.
+ *
+ * MIRRORED, not imported: this Worker is zero-dependency by design (it deploys
+ * from this single file, in a different zone/account from the agent). The
+ * agent's `md_twin` resource field derives the SAME path — see `mdTwinPath` in
+ * src/overrides.ts. Change one, change the other, or a published twin lands on
+ * a key the lane never looks up.
+ */
+function twinPath(pathname: string): string {
+  return pathname.endsWith('/') ? `${pathname}index.md` : `${pathname}.md`;
+}
+
+/** A markdown-lane response: identical headers whether the body came from the
+ *  origin's own twin or from a published `resource:<path>.md` override. */
+function markdownResponse(body: string, isHead: boolean, contentType?: string): Response {
+  return new Response(isHead ? null : body, {
+    headers: {
+      'content-type': contentType || 'text/markdown; charset=utf-8',
+      'x-markdown-tokens': String(Math.ceil(body.length / 4)),
+      'content-signal': CONTENT_SIGNAL,
+      vary: 'accept',
+    },
+  });
+}
+
 /** Append a token to Vary without dropping any value the origin already set. */
 function appendVary(headers: Headers, token: string): void {
   const existing = headers.get('vary');
@@ -269,14 +303,15 @@ export default {
       // falls through to the normal proxy. MARKDOWN_LANE="false" disables.
       const mdEnv = env as Env & { MARKDOWN_LANE?: string };
       const isHead = request.method === 'HEAD';
+      const mdLaneOn = !/^(false|0|off)$/i.test(mdEnv.MARKDOWN_LANE ?? '');
       const wantsMd =
         (request.method === 'GET' || isHead) &&
-        !/^(false|0|off)$/i.test(mdEnv.MARKDOWN_LANE ?? '') &&
+        mdLaneOn &&
         (request.headers.get('accept') || '').includes('text/markdown') &&
         !/\.[A-Za-z0-9]+$/.test(url.pathname);
       if (wantsMd) {
+        const mdPath = twinPath(url.pathname);
         try {
-          const mdPath = url.pathname.endsWith('/') ? `${url.pathname}index.md` : `${url.pathname}.md`;
           const mdRes = await fetch(`https://${env.ORIGIN_HOST}${mdPath}`, {
             headers: { 'user-agent': request.headers.get('user-agent') || 'seo-agent-injector' },
           });
@@ -284,22 +319,44 @@ export default {
             const body = await mdRes.text();
             tapAeo(env, ctx, request, url.pathname, 200, 'md');
             // HEAD: same headers as GET, no body.
-            return new Response(isHead ? null : body, {
-              headers: {
-                'content-type': 'text/markdown; charset=utf-8',
-                'x-markdown-tokens': String(Math.ceil(body.length / 4)),
-                'content-signal': CONTENT_SIGNAL,
-                vary: 'accept',
-              },
-            });
+            return markdownResponse(body, isHead);
           }
         } catch {
-          // fall through to the normal proxy
+          // fall through to the override check, then the normal proxy
+        }
+        // The ORIGIN ALWAYS WINS: only when it has no twin (404, HTML shell,
+        // fetch error) do we look for a published one at `resource:<twin>`.
+        // This is the only extra lookup the lane ever costs, and it happens
+        // solely on requests that already asked for markdown.
+        if (!bypassResource) {
+          const twin = await readResourceOverride(env, mdPath, ctx);
+          if (twin) {
+            tapAeo(env, ctx, request, url.pathname, 200, 'md');
+            return markdownResponse(twin.body, isHead, twin.contentType);
+          }
         }
       }
 
       const res = await fetch(new Request(originUrl, request));
       const contentType = res.headers.get('content-type') || '';
+
+      // Direct `.md` fetches: agents request twin URLs literally, not only via
+      // Accept negotiation. When the origin has no such file, a published twin
+      // answers instead — same headers, same telemetry lane. Costs a lookup
+      // only on a request that already 404'd for a `.md` path.
+      if (
+        mdLaneOn &&
+        !bypassResource &&
+        (request.method === 'GET' || isHeadMethod) &&
+        res.status === 404 &&
+        url.pathname.toLowerCase().endsWith('.md')
+      ) {
+        const twin = await readResourceOverride(env, url.pathname, ctx);
+        if (twin) {
+          tapAeo(env, ctx, request, url.pathname, 200, 'md');
+          return markdownResponse(twin.body, isHeadMethod, twin.contentType);
+        }
+      }
 
       // Only HTML pages carry the meta we patch; assets/sitemap/robots stream
       // through. A markdown file served directly by the origin (a direct .md

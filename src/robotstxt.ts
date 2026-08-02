@@ -29,7 +29,7 @@
  */
 
 import { createProposal, ApiError } from './actions.js';
-import { RESOURCE_FIELDS, RESOURCE_MAX_CHARS } from './overrides.js';
+import { fixedResourceSpec, RESOURCE_MAX_CHARS } from './overrides.js';
 import { ANSWER_ENGINE_BOTS, classifyTextResource, parseRobots, robotsDecision } from './aeo.js';
 import { VERSION } from './version.js';
 import type { AgentDeps } from './deps.js';
@@ -306,7 +306,7 @@ async function headOk(url: string): Promise<boolean> {
  * would silently drop whatever the owner changed since the last run.
  */
 export async function generateRobotsProposal(deps: Pick<AgentDeps, 'db' | 'config' | 'overrides'>) {
-  const spec = RESOURCE_FIELDS.get('robots_txt')!;
+  const spec = fixedResourceSpec('robots_txt');
   const origin = new URL(deps.config.siteUrl).origin;
   const url = `${origin}${spec.path}`;
   const classify = (f: FetchedRobots) => (f.error ? 'error' : classifyTextResource(f.status, f.contentType, f.body));
