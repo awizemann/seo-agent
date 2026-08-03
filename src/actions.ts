@@ -7,13 +7,14 @@
 import { runCrawl, prunePageSnapshots } from './crawl.js';
 import { runRules, validateTitle, type Triggered } from './rules.js';
 import { aeoChecks } from './aeo.js';
-import { enqueueCandidates, draftWithTrace, invalidReason, PROPOSABLE_RULES } from './propose.js';
+import { enqueueCandidates, draftWithTrace, invalidReason, fieldForRule } from './propose.js';
 import { findBannedTerm, type SiteConfig } from './config.js';
 import { ingestGsc } from './gsc.js';
 import { applyOverride, applyResource, revertChange, isPatternSpec, mdTwinPathReason, RESOURCE_FIELDS, RESOURCE_MAX_CHARS } from './overrides.js';
 import { telemetrySummary, telemetryFindings, pruneTelemetry, rollupTelemetryWeekly, listCrawlerHits as telemetryHits } from './telemetry.js';
 import { runCitationProbes, citationFindings, citationConfig, alreadyCheckedToday } from './citations.js';
 import { impactFindings } from './impact.js';
+import { overrideVerificationFindings } from './verify.js';
 import type { AgentDeps } from './deps.js';
 
 export class ApiError extends Error {
@@ -93,6 +94,12 @@ export async function runPipeline(deps: AgentDeps, runId: number) {
       }
     };
     await sense('aeo', () => aeoChecks(deps.config, snapshots));
+    // Override-verification sense: config-free proof that the edge SEO layer is
+    // still serving what we approved (KV expected vs crawled delivered). It
+    // lands before the shellTitle detector in rules.ts contributes its own
+    // injection_regression for the same path — both share the (path, rule) key
+    // and runRules keeps the FIRST occurrence, so this more specific detail wins.
+    await sense('override_verify', () => overrideVerificationFindings(deps, snapshots));
     await sense('telemetry', () => telemetryFindings(deps.db));
     // Change-impact sense: computes any newly-computable d14/d28 verdicts from
     // GSC history (uses the previous run's ingest — GSC lags days regardless)
@@ -298,25 +305,34 @@ export async function listFindings(deps: Pick<AgentDeps, 'db'>, status = 'open')
   ).results;
   for (const p of propRows) latestByFinding.set(p.finding_id, { id: p.id, status: p.status });
 
-  // Draftable: an OPEN finding on a description-fixable rule whose page has no
-  // live (proposed/approved) description proposal — the SAME idempotency the
-  // queue consumer enforces, so the "Draft fix" button can never fire a no-op.
-  const livePaths = new Set<string>();
+  // Draftable: an OPEN finding on a draftable rule whose page has no live
+  // (proposed/approved) proposal FOR THAT RULE'S FIELD — the SAME idempotency
+  // the queue consumer enforces, so the "Draft fix" button can never fire a
+  // no-op. Keyed per (path, field): a live title proposal must not grey out the
+  // description draft on the same page, or vice versa.
+  const liveKeys = new Set<string>();
   if (status === 'open') {
     const live = (
-      await deps.db.prepare("SELECT DISTINCT path FROM proposals WHERE field = 'description' AND status IN ('proposed', 'approved')").all<{
-        path: string;
-      }>()
+      await deps.db.prepare(
+        "SELECT DISTINCT path, field FROM proposals WHERE field IN ('description', 'title') AND status IN ('proposed', 'approved')"
+      ).all<{ path: string; field: string }>()
     ).results;
-    for (const r of live) livePaths.add(r.path);
+    for (const r of live) liveKeys.add(liveKey(r.path, r.field));
   }
 
-  return rows.map((f) => ({
-    ...f,
-    remediation: remediationFor(latestByFinding.get(f.id)),
-    draftable: status === 'open' && PROPOSABLE_RULES.has(f.rule) && !livePaths.has(f.path),
-  }));
+  return rows.map((f) => {
+    const field = fieldForRule(f.rule);
+    return {
+      ...f,
+      remediation: remediationFor(latestByFinding.get(f.id)),
+      draftable: status === 'open' && !!field && !liveKeys.has(liveKey(f.path, field)),
+    };
+  });
 }
+
+// A page path may contain any character a URL path may, so the (path, field)
+// composite key is joined on NUL — which one never can.
+const liveKey = (path: string, field: string): string => `${path}\u0000${field}`;
 
 /**
  * Pure state-transition guard for dismiss/restore, so the 404/409 contract is
@@ -369,30 +385,40 @@ export async function restoreFinding(deps: Pick<AgentDeps, 'db'>, id: number) {
 }
 
 /**
- * "Draft fix": enqueue an AI meta-description draft for an OPEN, description-
- * fixable finding by sending the exact job the pipeline's candidate selection
- * would — the queue consumer (draftAndCreate) creates the proposal. Reuses the
- * consumer's path-level idempotency, so this is a no-op when a live proposal
- * already exists.
+ * "Draft fix": enqueue a draft for an OPEN, fixable finding by sending the exact
+ * job the pipeline's candidate selection would — the queue consumer
+ * (draftAndCreate) creates the proposal. Reuses the consumer's (path, field)
+ * idempotency, so this is a no-op when a live proposal for the same field
+ * already exists — and stays available when the page's OTHER field has one.
  */
 export async function draftFinding(deps: Pick<AgentDeps, 'db' | 'draftQueue'>, id: number) {
-  const f = await deps.db.prepare('SELECT id, path, rule, status FROM findings WHERE id = ?')
+  const f = await deps.db.prepare('SELECT id, path, rule, detail, status FROM findings WHERE id = ?')
     .bind(id)
-    .first<{ id: number; path: string; rule: string; status: string }>();
+    .first<{ id: number; path: string; rule: string; detail: string | null; status: string }>();
   if (!f) throw new ApiError('finding not found', 404);
   if (f.status !== 'open') throw new ApiError(`finding is ${f.status}, only open findings can be drafted`, 409);
-  if (!PROPOSABLE_RULES.has(f.rule)) throw new ApiError(`rule ${f.rule} is not one the drafting pipeline can fix`, 400);
+  const field = fieldForRule(f.rule);
+  if (!field) throw new ApiError(`rule ${f.rule} is not one the drafting pipeline can fix`, 400);
   const existing = await deps.db.prepare(
-    "SELECT 1 FROM proposals WHERE path = ? AND field = 'description' AND status IN ('proposed', 'approved') LIMIT 1"
+    "SELECT 1 FROM proposals WHERE path = ? AND field = ? AND status IN ('proposed', 'approved') LIMIT 1"
   )
-    .bind(f.path)
+    .bind(f.path, field)
     .first();
-  if (existing) return { ok: true, enqueued: 0, note: 'a proposal for this page is already live' };
+  if (existing) return { ok: true, enqueued: 0, note: `a ${field} proposal for this page is already live` };
   const snap = await deps.db.prepare('SELECT title, description FROM page_snapshots WHERE path = ? ORDER BY id DESC LIMIT 1')
     .bind(f.path)
     .first<{ title: string | null; description: string | null }>();
   if (!snap) throw new ApiError('no snapshot for that path — run a crawl first', 404);
-  await deps.draftQueue.send({ findingId: f.id, path: f.path, rule: f.rule, title: snap.title, current: snap.description });
+  await deps.draftQueue.send({
+    findingId: f.id,
+    path: f.path,
+    rule: f.rule,
+    field,
+    detail: f.detail,
+    title: snap.title,
+    description: snap.description,
+    current: field === 'title' ? snap.title : snap.description,
+  });
   console.log(JSON.stringify({ evt: 'finding_draft_enqueued', id, path: f.path }));
   return { ok: true, enqueued: 1, note: 'draft queued — the proposal appears within ~1–2 min' };
 }

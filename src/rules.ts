@@ -18,8 +18,11 @@ const DESCRIPTION_MAX = 160;
 // truncation clips from the end (the suffix), and the site name displays
 // separately via WebSite JSON-LD, so suffix overflow is tolerated up to a
 // sanity bound. When no brand suffix is configured, the core IS the whole title.
-const TITLE_CORE_MAX = 60;
-const TITLE_TOTAL_MAX = 80;
+// Exported: the drafting pipeline (propose.ts) validates drafted titles against
+// the SAME bounds the rules flag them by, so a draft can never satisfy the
+// drafter and re-open its own finding on the next crawl.
+export const TITLE_CORE_MAX = 60;
+export const TITLE_TOTAL_MAX = 80;
 
 // Snapshots carry raw HTML text — decode common entities so length checks
 // measure what readers see (&amp; is 1 char, not 5). Exported for tests.

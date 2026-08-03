@@ -34,13 +34,18 @@ Daily cron (and `POST /run` on demand):
    JSON-LD, noindex-in-sitemap, long titles, new/removed pages — plus the
    [AEO/GEO checks](#aeo--geo-checks-ai-answer-engines): llms.txt health, robots.txt
    AI-crawler policy, and an AI-user-agent deliverability sample.
-3. **Generate** — a run *enqueues* one drafting job per description-quality finding
-   (capped at `MAX_PROPOSALS_PER_RUN`) and returns immediately; a **queue consumer**
-   drafts them one at a time with Workers AI. Keeping drafting off the request path
-   means a slow or variable model call is isolated to its own message (and retried by
-   the queue) instead of stalling the run or blowing an invocation budget. Output is
-   validated hard (length window, complete sentence, no quotes); invalid drafts are
-   dropped and the finding re-enqueues next run.
+3. **Generate** — a run *enqueues* one drafting job per description- or title-quality
+   finding (capped at `MAX_PROPOSALS_PER_RUN`) and returns immediately; a **queue
+   consumer** drafts them one at a time with Workers AI. Keeping drafting off the
+   request path means a slow or variable model call is isolated to its own message (and
+   retried by the queue) instead of stalling the run or blowing an invocation budget.
+   Output is validated hard — descriptions on a length window, complete sentence and no
+   quotes; titles on the 60-char core / 80-char total bounds, the brand suffix (which
+   your injector appends itself, so a draft must never carry it) and "actually
+   different from what we serve today". `doubled_title_suffix` needs no model at all:
+   dropping the repeated suffix has one right answer, so it is drafted deterministically
+   and reviewed through the same proposal flow. Invalid drafts are dropped and the
+   finding re-enqueues next run.
 4. **Act** — approved proposals become KV overrides (`override:<path>` →
    `{"description": "...", "title": "..."}`) that the site's injector merges over its
    computed meta. Live within the injector's KV cache TTL. Nothing auto-applies unless
@@ -510,9 +515,11 @@ count `open` only.
 
 - `POST /findings/:id/dismiss` — mute an open finding (409 unless open, 404 unknown)
 - `POST /findings/:id/restore` — un-mute a dismissed finding (409 unless dismissed)
-- `POST /findings/:id/draft` — **Draft fix**: for an open, description-fixable
-  finding with no live proposal, enqueue the same drafting job the pipeline would;
-  the queue consumer creates the proposal (idempotent — a no-op if one already exists)
+- `POST /findings/:id/draft` — **Draft fix**: for an open, fixable finding with no
+  live proposal *for that rule's field*, enqueue the same drafting job the pipeline
+  would; the queue consumer creates the proposal (idempotent — a no-op if one already
+  exists). Gating is per `(path, field)`, so a page's pending title proposal never
+  blocks a description draft, or vice versa.
 - **MCP:** `dismiss_finding`, `restore_finding`; `list_findings` gains a `dismissed`
   status and returns `remediation` + `draftable` on every row.
 
