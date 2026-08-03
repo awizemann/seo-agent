@@ -54,37 +54,59 @@ export function truncateValue(value: string): string {
   return flat.length > DETAIL_VALUE_MAX ? `${flat.slice(0, DETAIL_VALUE_MAX - 1)}…` : flat;
 }
 
+/** Fold whitespace the way a <title> renderer does. Applied to BOTH sides. */
+const foldSpace = (value: string): string => value.replace(/\s+/g, ' ').trim();
+
 /**
- * Compare two head values the way a reader would, not the way bytes do.
+ * The DELIVERED side of the comparison, undone back to the string we stored.
  *
- * Mirrors what the injector + the crawl do to a stored string on the round
- * trip. The injector writes the raw stored text into the document
- * (`setInnerContent` for <title>, `setAttribute('content', …)` for the metas),
- * which HTML-escapes it; the crawl reads it back as raw HTML text and only
- * trims the title. So the round trip can legitimately turn `A & B` into
- * `A &amp; B`, and can legitimately re-wrap whitespace inside <title>. Neither
- * is a regression, so both are normalized away here — the same entity decoding
- * rules.ts applies before its own length checks, plus whitespace folding.
+ * The round trip is: we PUT a raw string into KV → the injector writes it into
+ * the document (`setInnerContent` for <title>, `setAttribute('content', …)` for
+ * the metas), which HTML-ESCAPES it → the crawl reads it back as raw HTML text.
+ * So the delivered text is `escape(stored)`, and decoding it exactly once
+ * recovers `stored`. `A & B` legitimately arrives as `A &amp; B`, and <title>
+ * whitespace can legitimately be re-wrapped; neither is a regression.
+ *
+ * Audit M4 — this is why the decode is applied to the DELIVERED side ONLY, not
+ * to both. A stored value may itself contain a literal entity (an operator
+ * pasted `Tips &amp; Tricks`, meaning those nine characters); the injector
+ * escapes it again, so the crawl sees `Tips &amp;amp; Tricks`. One decode of
+ * the delivered side gives back the stored `Tips &amp; Tricks` and matches.
+ * Decoding BOTH sides would compare `Tips &amp; Tricks` against
+ * `Tips & Tricks` and emit a false critical. Escaping is not idempotent, so the
+ * comparison cannot be either.
  */
 export function normalizeDelivered(value: string): string {
-  return decodeEntities(value).replace(/\s+/g, ' ').trim();
+  return foldSpace(decodeEntities(value));
 }
 
 /**
- * The title the injector is expected to have delivered for a stored core.
- *
- * The stored value is the CORE only — the site's edge layer appends
- * TITLE_BRAND_SUFFIX itself (see the title drafting prompt in propose.ts and
- * the suffix-stripping in rules.ts, which both hold this contract). So the
- * expected delivered title is core + suffix, EXCEPT when the stored core
- * already ends with the suffix: that is the `doubled_title_suffix` bug, which
- * has its own rule and its own finding, and re-flagging it here as an injection
- * regression would blame the injector for a content problem.
+ * The EXPECTED side: the stored value with whitespace folded and nothing else.
+ * Deliberately NOT entity-decoded — see normalizeDelivered (audit M4).
  */
-export function expectedTitle(core: string, suffix: string): string {
-  const c = core.trim();
-  if (!suffix) return c;
-  return c.endsWith(suffix.trim()) ? c : `${c}${suffix}`;
+export function normalizeExpected(value: string): string {
+  return foldSpace(value);
+}
+
+/**
+ * The title the injector is expected to have delivered for a stored value:
+ * the stored value itself, VERBATIM.
+ *
+ * No suffix model. The injector's `setInnerContent` REPLACES the origin
+ * <title> with the stored string and appends nothing, and since v1.15.1 the
+ * stored string is already the full served value — the brand suffix is
+ * appended at apply time, in `withTitleSuffix`/`applyOverride` (overrides.ts
+ * holds the contract). The pre-1.15.1 version of this function expected
+ * core + TITLE_BRAND_SUFFIX and so flagged every drafted title as a false
+ * critical `injection_regression`.
+ *
+ * Kept as a named export because the round trip still needs naming: the caller
+ * runs this through `normalizeExpected` and the crawled value through
+ * `normalizeDelivered`, which is what keeps a stored literal entity from
+ * false-positiving (audit M4).
+ */
+export function expectedTitle(stored: string): string {
+  return stored.trim();
 }
 
 /**
@@ -92,7 +114,7 @@ export function expectedTitle(core: string, suffix: string): string {
  *
  * Exported for tests — the async wrapper below only adds the KV listing.
  */
-export function verifyOverrides(entries: OverrideEntry[], snapshots: PageSnapshot[], suffix: string): Triggered[] {
+export function verifyOverrides(entries: OverrideEntry[], snapshots: PageSnapshot[]): Triggered[] {
   const byPath = new Map(snapshots.map((s) => [s.path, s]));
   const out: Triggered[] = [];
   for (const entry of entries) {
@@ -102,7 +124,9 @@ export function verifyOverrides(entries: OverrideEntry[], snapshots: PageSnapsho
 
     const mismatches: string[] = [];
     if (entry.title) {
-      const expected = normalizeDelivered(expectedTitle(entry.title, suffix));
+      // The delivered side is decoded once (it is escape(stored)); the stored
+      // side is not. See normalizeDelivered — audit M4.
+      const expected = normalizeExpected(expectedTitle(entry.title));
       const delivered = normalizeDelivered(snap.title ?? '');
       if (expected && expected !== delivered) {
         mismatches.push(
@@ -111,7 +135,8 @@ export function verifyOverrides(entries: OverrideEntry[], snapshots: PageSnapsho
       }
     }
     if (entry.description) {
-      const expected = normalizeDelivered(entry.description);
+      // Same asymmetry as the title lane, for the same reason (audit M4).
+      const expected = normalizeExpected(entry.description);
       const delivered = normalizeDelivered(snap.description ?? '');
       if (expected && expected !== delivered) {
         mismatches.push(
@@ -171,10 +196,10 @@ export async function listPageOverrides(deps: Pick<AgentDeps, 'overrides'>): Pro
  * isolated the same way (a throw degrades to zero findings from this sense).
  */
 export async function overrideVerificationFindings(
-  deps: Pick<AgentDeps, 'overrides' | 'config'>,
+  deps: Pick<AgentDeps, 'overrides'>,
   snapshots: PageSnapshot[]
 ): Promise<Triggered[]> {
   if (snapshots.length === 0) return [];
   const entries = await listPageOverrides(deps);
-  return verifyOverrides(entries, snapshots, deps.config.titleBrandSuffix);
+  return verifyOverrides(entries, snapshots);
 }

@@ -98,9 +98,12 @@ export {
   mdTwinPathReason,
 } from './overrides.js';
 export type { ResourceSpec, PatternResourceSpec, AnyResourceSpec } from './overrides.js';
+// The title suffix contract: what a stored override value actually is. A host
+// that writes overrides outside applyOverride must apply the same rule.
+export { withTitleSuffix, storedOverrideValue } from './overrides.js';
 
 // Drafting — the queue consumer half, and the validator the drafts must pass.
-export { draftAndCreate, invalidReason } from './propose.js';
+export { draftAndCreate, invalidReason, type DraftAndCreateResult } from './propose.js';
 export type { DraftJob, DraftTrace } from './propose.js';
 
 // ---------------------------------------------------------------------------

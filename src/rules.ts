@@ -13,8 +13,10 @@ export type Triggered = { path: string; rule: string; severity: string; detail: 
 
 const DESCRIPTION_MIN = 70;
 const DESCRIPTION_MAX = 160;
-// The injector appends the brand suffix (TITLE_BRAND_SUFFIX) after capping the
-// core — so a long core is a regression tripwire, not routine noise. SERP
+// A published title is core + brand suffix (TITLE_BRAND_SUFFIX), the suffix
+// appended at apply time by `withTitleSuffix` (overrides.ts holds the contract)
+// after the core is capped — so a long core is a regression tripwire, not
+// routine noise. SERP
 // truncation clips from the end (the suffix), and the site name displays
 // separately via WebSite JSON-LD, so suffix overflow is tolerated up to a
 // sanity bound. When no brand suffix is configured, the core IS the whole title.
@@ -106,13 +108,21 @@ export async function runRules(
       if (cfg.shellTitle && title === cfg.shellTitle && s.path !== '/') {
         add(s.path, 'injection_regression', 'critical', 'page serves the static shell title — edge SEO layer did not run (fail-open?)');
       }
+      // These run on the DELIVERED title, which is core + suffix (whether the
+      // origin bakes it in or we appended it at apply time — see
+      // `withTitleSuffix` in overrides.ts). Stripping one suffix off the end
+      // recovers the core the bounds are written against.
       const suffix = cfg.titleBrandSuffix;
       const core = suffix && title.endsWith(suffix) ? title.slice(0, -suffix.length) : title;
       if (core.length > TITLE_CORE_MAX || title.length > TITLE_TOTAL_MAX) {
         add(s.path, 'long_title', 'low', `core ${core.length} chars (max ${TITLE_CORE_MAX}), total ${title.length} (max ${TITLE_TOTAL_MAX}): ${title}`);
       }
-      // Tripwire: a stored title with the brand suffix baked in gets suffixed
-      // again by the injector, doubling it.
+      // Tripwire: after stripping ONE trailing suffix above, the core still
+      // ends with the suffix — i.e. the delivered title carries it TWICE. Our
+      // own publish path cannot cause this (applyOverride appends only when the
+      // value doesn't already end with the suffix), so a hit means the origin
+      // bakes the suffix into a core we then suffixed, or an operator stored a
+      // pre-suffixed title by hand.
       if (suffix && core.endsWith(suffix)) {
         add(s.path, 'doubled_title_suffix', 'high', `title carries the site suffix twice: ${title}`);
       }

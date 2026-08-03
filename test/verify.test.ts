@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { verifyOverrides, listPageOverrides, overrideVerificationFindings, expectedTitle, normalizeDelivered, truncateValue } from '../src/verify';
+import {
+  verifyOverrides,
+  listPageOverrides,
+  overrideVerificationFindings,
+  expectedTitle,
+  normalizeDelivered,
+  normalizeExpected,
+  truncateValue,
+} from '../src/verify';
 import { runRules } from '../src/rules';
 import type { PageSnapshot } from '../src/crawl';
 
@@ -41,7 +49,7 @@ function fakeKv(initial: Record<string, string> = {}, pageSize = 1000) {
 
 describe('override verification — pure comparison', () => {
   it('fires injection_regression when the delivered title is not the approved one', () => {
-    const t = verifyOverrides([{ path: '/a', title: 'Approved Title' }], [snap({ path: '/a', title: 'Old Origin Title' })], '');
+    const t = verifyOverrides([{ path: '/a', title: 'Approved Title' }], [snap({ path: '/a', title: 'Old Origin Title' })]);
     expect(t).toHaveLength(1);
     expect(t[0]).toMatchObject({ path: '/a', rule: 'injection_regression', severity: 'critical' });
     expect(t[0].detail).toContain('Approved Title');
@@ -50,48 +58,72 @@ describe('override verification — pure comparison', () => {
   });
 
   it('stays silent when the delivered value matches', () => {
-    expect(verifyOverrides([{ path: '/a', title: 'Approved Title' }], [snap({ path: '/a', title: 'Approved Title' })], '')).toEqual([]);
+    expect(verifyOverrides([{ path: '/a', title: 'Approved Title' }], [snap({ path: '/a', title: 'Approved Title' })])).toEqual([]);
   });
 
-  it('expects core + brand suffix when a suffix is configured', () => {
-    const entries = [{ path: '/a', title: 'Core' }];
-    expect(verifyOverrides(entries, [snap({ path: '/a', title: 'Core — Acme' })], ' — Acme')).toEqual([]);
-    // The bare core (no suffix) means the suffixing edge layer never ran.
-    const t = verifyOverrides(entries, [snap({ path: '/a', title: 'Core' })], ' — Acme');
+  // AUDIT H1 (fixed in v1.15.1): this suite used to pin the WRONG contract — it
+  // expected the delivered title to be the stored value PLUS TITLE_BRAND_SUFFIX,
+  // on the belief that the site's edge layer appended it. Nothing did: the
+  // injector's setInnerContent REPLACES the whole <title> with the stored
+  // string. The suffix is now appended at APPLY time (withTitleSuffix in
+  // overrides.ts), so the stored value IS the full served value and this sense
+  // compares it verbatim.
+  it('compares the stored title verbatim — no suffix is added to the expectation', () => {
+    // Stored value already carries the suffix (that is what applyOverride wrote).
+    expect(verifyOverrides([{ path: '/a', title: 'Core — Acme' }], [snap({ path: '/a', title: 'Core — Acme' })])).toEqual([]);
+    // A bare core in KV is served bare — and must NOT be reported as a
+    // regression by inventing a suffix that nothing appends.
+    expect(verifyOverrides([{ path: '/a', title: 'Core' }], [snap({ path: '/a', title: 'Core' })])).toEqual([]);
+  });
+
+  it('still fires when the delivered title really is something else', () => {
+    const t = verifyOverrides([{ path: '/a', title: 'Core — Acme' }], [snap({ path: '/a', title: 'Old Origin Title' })]);
     expect(t).toHaveLength(1);
     expect(t[0].detail).toContain('Core — Acme');
   });
 
-  it('does not double-append when the stored core already carries the suffix', () => {
-    // That is the doubled_title_suffix bug, which has its own rule — this sense
-    // must not blame the injector for it.
-    expect(verifyOverrides([{ path: '/a', title: 'Core — Acme' }], [snap({ path: '/a', title: 'Core — Acme' })], ' — Acme')).toEqual([]);
-  });
-
   it('accepts an entity-encoded delivered value (the injector escapes what it writes)', () => {
-    expect(verifyOverrides([{ path: '/a', title: 'Tools & Toys' }], [snap({ path: '/a', title: 'Tools &amp; Toys' })], '')).toEqual([]);
+    expect(verifyOverrides([{ path: '/a', title: 'Tools & Toys' }], [snap({ path: '/a', title: 'Tools &amp; Toys' })])).toEqual([]);
     expect(
-      verifyOverrides([{ path: '/a', description: 'A "quoted" phrase & more' }], [snap({ path: '/a', description: 'A &quot;quoted&quot; phrase &amp; more' })], '')
+      verifyOverrides([{ path: '/a', description: 'A "quoted" phrase & more' }], [snap({ path: '/a', description: 'A &quot;quoted&quot; phrase &amp; more' })])
     ).toEqual([]);
   });
 
+  // Audit M4: the comparison must be SYMMETRIC. The stored value can itself
+  // contain a literal entity (an operator pasted "Tips &amp; Tricks"), which the
+  // injector escapes AGAIN on the way out. Decoding only the delivered side
+  // would read that as a mismatch and emit a false critical.
+  it('decodes BOTH sides — a stored literal entity is not a regression (title lane)', () => {
+    expect(
+      verifyOverrides([{ path: '/a', title: 'Tips &amp; Tricks' }], [snap({ path: '/a', title: 'Tips &amp;amp; Tricks' })])
+    ).toEqual([]);
+    // …and the description lane, which was already symmetric — keep it that way.
+    expect(
+      verifyOverrides([{ path: '/a', description: 'Tips &amp; Tricks' }], [snap({ path: '/a', description: 'Tips &amp;amp; Tricks' })])
+    ).toEqual([]);
+  });
+
+  it('a stored literal entity still fires when a different value is served', () => {
+    expect(verifyOverrides([{ path: '/a', title: 'Tips &amp; Tricks' }], [snap({ path: '/a', title: 'Something Else' })])).toHaveLength(1);
+  });
+
   it('tolerates whitespace re-wrapping inside the delivered title', () => {
-    expect(verifyOverrides([{ path: '/a', title: 'A Long Title' }], [snap({ path: '/a', title: '  A   Long\n  Title ' })], '')).toEqual([]);
+    expect(verifyOverrides([{ path: '/a', title: 'A Long Title' }], [snap({ path: '/a', title: '  A   Long\n  Title ' })])).toEqual([]);
   });
 
   it('compares descriptions directly and names the field', () => {
-    const t = verifyOverrides([{ path: '/a', description: 'Approved copy.' }], [snap({ path: '/a', description: 'Origin copy.' })], '');
+    const t = verifyOverrides([{ path: '/a', description: 'Approved copy.' }], [snap({ path: '/a', description: 'Origin copy.' })]);
     expect(t).toHaveLength(1);
     expect(t[0].detail).toMatch(/description: expected "Approved copy\.", delivered "Origin copy\."/);
   });
 
   it('reports a missing delivered value as "nothing" rather than an empty quote', () => {
-    const t = verifyOverrides([{ path: '/a', description: 'Approved copy.' }], [snap({ path: '/a', description: null })], '');
+    const t = verifyOverrides([{ path: '/a', description: 'Approved copy.' }], [snap({ path: '/a', description: null })]);
     expect(t[0].detail).toContain('delivered nothing');
   });
 
   it('reports both fields in one finding for one path', () => {
-    const t = verifyOverrides([{ path: '/a', title: 'T', description: 'D' }], [snap({ path: '/a', title: 'x', description: 'y' })], '');
+    const t = verifyOverrides([{ path: '/a', title: 'T', description: 'D' }], [snap({ path: '/a', title: 'x', description: 'y' })]);
     expect(t).toHaveLength(1);
     expect(t[0].detail).toContain('title:');
     expect(t[0].detail).toContain('description:');
@@ -99,30 +131,32 @@ describe('override verification — pure comparison', () => {
 
   it('skips non-2xx snapshots — head fields are meaningless there', () => {
     for (const status of [0, 301, 404, 500]) {
-      expect(verifyOverrides([{ path: '/a', title: 'T' }], [snap({ path: '/a', status, title: 'wrong' })], '')).toEqual([]);
+      expect(verifyOverrides([{ path: '/a', title: 'T' }], [snap({ path: '/a', status, title: 'wrong' })])).toEqual([]);
     }
   });
 
   it('skips paths not crawled this run — no evidence either way', () => {
-    expect(verifyOverrides([{ path: '/gone', title: 'T' }], [snap({ path: '/a', title: 'T' })], '')).toEqual([]);
+    expect(verifyOverrides([{ path: '/gone', title: 'T' }], [snap({ path: '/a', title: 'T' })])).toEqual([]);
   });
 
   it('truncates long values in the detail', () => {
     const long = 'x'.repeat(400);
-    const t = verifyOverrides([{ path: '/a', title: long }], [snap({ path: '/a', title: 'short' })], '');
+    const t = verifyOverrides([{ path: '/a', title: long }], [snap({ path: '/a', title: 'short' })]);
     expect(t[0].detail.length).toBeLessThan(400);
     expect(t[0].detail).toContain('…');
   });
 });
 
 describe('override verification — helpers', () => {
-  it('expectedTitle appends only when needed', () => {
-    expect(expectedTitle('Core', '')).toBe('Core');
-    expect(expectedTitle(' Core ', ' | A')).toBe('Core | A');
-    expect(expectedTitle('Core | A', ' | A')).toBe('Core | A');
+  it('expectedTitle is the stored value, trimmed — it appends nothing (audit H1)', () => {
+    expect(expectedTitle('Core')).toBe('Core');
+    expect(expectedTitle(' Core | A ')).toBe('Core | A');
   });
   it('normalizeDelivered decodes entities and folds whitespace', () => {
     expect(normalizeDelivered(' a  &amp;\nb ')).toBe('a & b');
+  });
+  it('normalizeExpected folds whitespace but does NOT decode (audit M4)', () => {
+    expect(normalizeExpected(' a  &amp;\nb ')).toBe('a &amp; b');
   });
   it('truncateValue keeps short values verbatim', () => {
     expect(truncateValue('  a  b ')).toBe('a b');

@@ -625,7 +625,7 @@ default or is optional. See `wrangler.example.jsonc` for the annotated template.
 | `AI_MODEL` (var) | | Workers AI text model for proposals |
 | `AUTO_APPLY_FIELDS` (var) | | Fields that may apply without approval; empty = approval required |
 | `MAX_PROPOSALS_PER_RUN` (var) | | Cap on AI drafts per run |
-| `TITLE_BRAND_SUFFIX` (var) | | Brand suffix your injector appends to titles; `""` disables the suffix rules |
+| `TITLE_BRAND_SUFFIX` (var) | | Brand suffix appended to every approved title on the way into KV, so the stored override *is* the full served value. The proposal row keeps the unsuffixed core (what you reviewed), so re-approving after you change this picks up the new suffix. `""` disables the suffix rules |
 | `SHELL_TITLE` (var) | | Your SPA shell's static `<title>`; `""` disables the injection-regression check |
 | `ARTICLE_PATH_PREFIX` (var) | | Content detail-page prefix (e.g. `/articles/`); enables the Article-JSON-LD check + enrichment |
 | `ARTICLE_API_TEMPLATE` (var) | | JSON endpoint with `{slug}` returning `{excerpt?, content?}` for richer drafting |

@@ -112,9 +112,12 @@ export const buildSystemPrompt = systemPrompt;
  * `guidanceLine` and lands as one line of one message — plus two title-only
  * constraints:
  *
- * - The site's own edge layer appends TITLE_BRAND_SUFFIX to whatever we store,
- *   so a drafted title must be the CORE only. Emitting the suffix is precisely
- *   the doubled_title_suffix bug, so the model is told not to, and the
+ * - A drafted title is the CORE only, because TITLE_BRAND_SUFFIX is appended by
+ *   US at apply time — see the contract on `withTitleSuffix` in overrides.ts.
+ *   (Before v1.15.1 this comment claimed the site's own edge layer appended it;
+ *   nothing did, and served titles lost their suffix.) The core is what the
+ *   reviewer judges and what the proposal row keeps. Emitting the suffix here
+ *   would be the doubled_title_suffix bug, so the model is told not to, and the
  *   validator rejects it if it does anyway.
  * - The budget the model is given is the core bound; the total bound is the
  *   validator's job, since only it knows the suffix length.
@@ -430,8 +433,22 @@ export async function enqueueCandidates(
  * Draft one proposal for a queued job and persist it (auto-applying if the
  * field is opted in). Runs in the queue consumer. Throwing signals the queue
  * to retry the message; returning (even with no proposal) acks it.
+ *
+ * Returns the outcome, including the created proposal's id when one was
+ * written. Public API on purpose: a host that wants to guard or auto-reject
+ * what this call produced can act on THIS row rather than re-selecting the
+ * newest proposal for the (path, field) and racing a concurrent draft.
+ * `{ created: false }` means nothing was written — an idempotency skip or a
+ * draft that never passed the validator.
  */
-export async function draftAndCreate(deps: Pick<AgentDeps, 'db' | 'overrides' | 'ai' | 'config'>, job: DraftJob): Promise<void> {
+export type DraftAndCreateResult =
+  | { created: true; proposalId: number; field: string; value: string; autoApplied: boolean }
+  | { created: false; field: string };
+
+export async function draftAndCreate(
+  deps: Pick<AgentDeps, 'db' | 'overrides' | 'ai' | 'config'>,
+  job: DraftJob
+): Promise<DraftAndCreateResult> {
   const cfg = deps.config;
   const field = job.field ?? fieldForRule(job.rule) ?? 'description';
   // Idempotency: another run/attempt may have already produced a proposal for
@@ -442,7 +459,7 @@ export async function draftAndCreate(deps: Pick<AgentDeps, 'db' | 'overrides' | 
   )
     .bind(job.path, field)
     .first();
-  if (existing) return;
+  if (existing) return { created: false, field };
 
   // doubled_title_suffix has exactly one correct fix, so compute it rather than
   // paying for (and risking) a model call. It still goes through the validator:
@@ -461,7 +478,8 @@ export async function draftAndCreate(deps: Pick<AgentDeps, 'db' | 'overrides' | 
       detail: job.detail,
       description: job.description,
     }));
-  if (!value) return; // invalid after retries — drop; the open finding re-enqueues next run
+  // invalid after retries — drop; the open finding re-enqueues next run
+  if (!value) return { created: false, field };
 
   const now = new Date().toISOString();
   const proposal = await deps.db.prepare(
@@ -472,11 +490,13 @@ export async function draftAndCreate(deps: Pick<AgentDeps, 'db' | 'overrides' | 
     .first<{ id: number }>();
 
   const autoFields = new Set(cfg.autoApplyFields);
-  if (proposal && autoFields.has(field)) {
+  const autoApplied = Boolean(proposal) && autoFields.has(field);
+  if (proposal && autoApplied) {
     await applyOverride(deps, { path: job.path, field, value, oldValue: job.current, source: 'auto', proposalId: proposal.id });
     await deps.db.prepare("UPDATE proposals SET status = 'approved', decided_at = ?, applied_at = ? WHERE id = ?")
       .bind(now, now, proposal.id)
       .run();
   }
-  console.log(JSON.stringify({ evt: 'proposal_created', path: job.path, field, id: proposal?.id, autoApplied: autoFields.has(field) }));
+  console.log(JSON.stringify({ evt: 'proposal_created', path: job.path, field, id: proposal?.id, autoApplied }));
+  return proposal ? { created: true, proposalId: proposal.id, field, value, autoApplied } : { created: false, field };
 }

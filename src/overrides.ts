@@ -14,6 +14,48 @@ import type { AgentDeps } from './deps.js';
 const OVERRIDE_FIELDS = new Set(['description', 'title']);
 
 /**
+ * THE TITLE SUFFIX CONTRACT (single source of truth — v1.15.1).
+ *
+ * A stored `override:<path>` value is the FULL value the injector serves,
+ * verbatim. The injector's `setInnerContent(o.title)` REPLACES the origin's
+ * whole <title> — it appends nothing — so anything not in the stored string is
+ * simply not delivered. Before v1.15.1 three modules assumed the site's edge
+ * layer appended TITLE_BRAND_SUFFIX to a stored core; nothing did, and served
+ * titles silently lost their brand suffix.
+ *
+ * So the suffix is appended HERE, at apply time, on the way into KV:
+ *
+ *  - proposal row  → the CORE the reviewer judged (unsuffixed). Re-approving
+ *    after a TITLE_BRAND_SUFFIX change therefore re-appends the CURRENT suffix.
+ *  - KV override   → core + suffix, the exact string the injector serves.
+ *
+ * `applyOverride` is the one choke point every title publish flows through
+ * (proposal approval in actions.ts `decideProposal`, and the auto-apply branch
+ * of propose.ts `draftAndCreate`), so the append lives there and nowhere else.
+ *
+ * Downstream consequences, kept in sync by this comment:
+ *  - verify.ts compares the stored value VERBATIM (no suffix model).
+ *  - rules.ts strips the suffix off a DELIVERED title before its core-length
+ *    math, and its `doubled_title_suffix` tripwire fires only when the suffix
+ *    appears TWICE — impossible from our own path, since we append only when
+ *    the value does not already end with it.
+ *  - propose.ts still drafts (and validates) the CORE: the drafter must not
+ *    write the suffix, because this function adds it.
+ */
+export function withTitleSuffix(value: string, suffix: string): string {
+  if (!suffix) return value;
+  return value.endsWith(suffix) ? value : `${value}${suffix}`;
+}
+
+/**
+ * The value that actually lands in KV for a field. Only `title` carries the
+ * brand suffix; a description is stored exactly as approved.
+ */
+export function storedOverrideValue(field: string, value: string, suffix: string | undefined): string {
+  return field === 'title' ? withTitleSuffix(value, suffix || '') : value;
+}
+
+/**
  * RESOURCE fields are the second kind of override. A page override merges
  * fields into a page's delivered <head>; a resource override REPLACES a whole
  * site-level file the injector serves straight from KV, at
@@ -189,10 +231,14 @@ export async function readOverride(deps: Pick<AgentDeps, 'overrides'>, path: str
 }
 
 export async function applyOverride(
-  deps: Pick<AgentDeps, 'db' | 'overrides'>,
+  deps: Pick<AgentDeps, 'db' | 'overrides'> & Partial<Pick<AgentDeps, 'config'>>,
   args: { path: string; field: string; value: string; oldValue: string | null; source: string; proposalId?: number }
 ): Promise<number> {
   if (!OVERRIDE_FIELDS.has(args.field)) throw new Error(`field not overridable: ${args.field}`);
+  // THE choke point for the title suffix contract — see withTitleSuffix above.
+  // The caller hands us the value the reviewer judged (the core); what goes to
+  // KV, to the journal's new_value, and to the reader is the full served value.
+  const value = storedOverrideValue(args.field, args.value, deps.config?.titleBrandSuffix);
   const current = await readOverride(deps, args.path);
   // Journal the TRUE prior state. The caller's oldValue is the proposal's
   // current_value, captured from a snapshot at proposal-creation — when an
@@ -200,14 +246,14 @@ export async function applyOverride(
   // (path, field) between crawls), that live value is what a revert must
   // restore, not the snapshot-era origin value.
   const oldValue = current[args.field] !== undefined ? current[args.field] : args.oldValue;
-  current[args.field] = args.value;
+  current[args.field] = value;
   await deps.overrides.put(overrideKey(args.path), JSON.stringify(current));
 
   const now = new Date().toISOString();
   const row = await deps.db.prepare(
     'INSERT INTO changes (applied_at, path, field, old_value, new_value, source, proposal_id) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id'
   )
-    .bind(now, args.path, args.field, oldValue, args.value, args.source, args.proposalId ?? null)
+    .bind(now, args.path, args.field, oldValue, value, args.source, args.proposalId ?? null)
     .first<{ id: number }>();
   console.log(JSON.stringify({ evt: 'override_applied', path: args.path, field: args.field, source: args.source }));
   return row?.id ?? 0;

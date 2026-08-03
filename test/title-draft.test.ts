@@ -419,11 +419,40 @@ describe('draftAndCreate — titles', () => {
       puts.push([k, v]);
     };
     const { ai } = scriptedAi(['unused']);
-    await draftAndCreate({ ...deps, ai, config: branded({ AUTO_APPLY_FIELDS: 'title' }) }, job());
+    const r = await draftAndCreate({ ...deps, ai, config: branded({ AUTO_APPLY_FIELDS: 'title' }) }, job());
     expect(inserted).toHaveLength(1);
     expect(puts).toHaveLength(1);
     expect(puts[0][0]).toBe('override:/p');
-    expect(JSON.parse(puts[0][1])).toEqual({ title: 'Pricing' });
+    // AUDIT H1 (v1.15.1): the proposal row keeps the CORE, but the STORED
+    // override is the full served value — applyOverride appends the suffix,
+    // because the injector appends nothing.
+    expect(inserted[0].value).toBe('Pricing');
+    expect(JSON.parse(puts[0][1])).toEqual({ title: `Pricing${SUFFIX}` });
+    expect(r).toMatchObject({ created: true, field: 'title', autoApplied: true });
+  });
+
+  // H2 enabler: hosts need THEIR row's id, not "the newest proposal for this
+  // (path, field)" — which races a concurrent draft.
+  it('returns the created proposal id', async () => {
+    const { deps, inserted } = proposalDb();
+    const { ai } = scriptedAi(['unused']);
+    const r = await draftAndCreate({ ...deps, ai, config: branded() }, job());
+    expect(inserted).toHaveLength(1);
+    expect(r).toEqual({ created: true, proposalId: 1, field: 'title', value: 'Pricing', autoApplied: false });
+  });
+
+  it('reports created:false when the idempotency check skips the job', async () => {
+    const { deps } = proposalDb([{ path: '/p', field: 'title' }]);
+    const { ai } = scriptedAi(['x']);
+    expect(await draftAndCreate({ ...deps, ai, config: branded() }, job())).toEqual({ created: false, field: 'title' });
+  });
+
+  it('reports created:false when every draft attempt is invalid', async () => {
+    const { deps, inserted } = proposalDb();
+    const { ai } = scriptedAi(['x'.repeat(200), 'y'.repeat(200)]);
+    const r = await draftAndCreate({ ...deps, ai, config: branded() }, job({ rule: 'long_title', detail: null }));
+    expect(inserted).toHaveLength(0);
+    expect(r).toEqual({ created: false, field: 'title' });
   });
 });
 
