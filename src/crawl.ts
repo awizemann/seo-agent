@@ -45,15 +45,28 @@ export function parseSitemap(xml: string, origin: string): ParsedSitemap {
   const entries: SitemapEntry[] = [];
   for (const block of xml.match(/<url>[\s\S]*?<\/url>/g) ?? []) {
     const loc = block.match(/<loc>\s*([^<]+?)\s*<\/loc>/)?.[1];
-    if (!loc || !loc.startsWith(origin)) continue;
+    if (!loc || !sameOrigin(loc, origin)) continue;
     entries.push({ loc, lastmod: block.match(/<lastmod>\s*([^<]+?)\s*<\/lastmod>/)?.[1] ?? null });
   }
   const sitemaps: string[] = [];
   for (const block of xml.match(/<sitemap>[\s\S]*?<\/sitemap>/g) ?? []) {
     const loc = block.match(/<loc>\s*([^<]+?)\s*<\/loc>/)?.[1];
-    if (loc && loc.startsWith(origin)) sitemaps.push(loc);
+    if (loc && sameOrigin(loc, origin)) sitemaps.push(loc);
   }
   return { entries, sitemaps };
+}
+
+/**
+ * True origin comparison, not a string prefix — a prefix check admits
+ * userinfo tricks (https://good.com@evil.net/) and lookalike hosts
+ * (https://good.com.evil.net/). Unparseable locs are rejected.
+ */
+function sameOrigin(loc: string, origin: string): boolean {
+  try {
+    return new URL(loc).origin === new URL(origin).origin;
+  } catch {
+    return false;
+  }
 }
 
 /** Dedupe entries by loc (first occurrence wins) and cap the total. Exported for tests. */

@@ -28,6 +28,26 @@ describe('parseSitemap', () => {
     expect(entries).toEqual([]);
     expect(sitemaps).toEqual(['https://example.com/sitemap-1.xml', 'https://example.com/sitemap-2.xml']);
   });
+
+  it('rejects prefix-lookalike origins: userinfo tricks, lookalike hosts, unparseable locs', () => {
+    const xml = `<?xml version="1.0"?><urlset>
+      <url><loc>https://example.com@evil.net/steal</loc></url>
+      <url><loc>https://example.com.evil.net/steal</loc></url>
+      <url><loc>https://example.com:8443/other-port</loc></url>
+      <url><loc>not a url at all</loc></url>
+      <url><loc>https://example.com/legit</loc></url>
+    </urlset>`;
+    const { entries } = parseSitemap(xml, ORIGIN);
+    expect(entries.map((e) => e.loc)).toEqual(['https://example.com/legit']);
+  });
+
+  it('rejects lookalike child sitemaps in a <sitemapindex>', () => {
+    const xml = `<sitemapindex>
+      <sitemap><loc>https://example.com@evil.net/s.xml</loc></sitemap>
+      <sitemap><loc>https://example.com/s.xml</loc></sitemap>
+    </sitemapindex>`;
+    expect(parseSitemap(xml, ORIGIN).sitemaps).toEqual(['https://example.com/s.xml']);
+  });
 });
 
 describe('dedupeAndCap', () => {
