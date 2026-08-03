@@ -85,6 +85,15 @@ export function mdTwinPathReason(pagePath: string): string | null {
   if (pagePath.includes('?') || pagePath.includes('#')) return 'path must not contain a query string or fragment';
   if (pagePath.includes('..')) return 'path must not contain ".."';
   if (pagePath.includes('//')) return 'path must not contain an empty segment';
+  // A backslash is not a path separator here, but it IS one to a URL parser:
+  // new URL('/\\evil.com/x', 'https://site.com') resolves to https://evil.com/x.
+  // Anything that publishes a twin eventually turns this path into a URL, so
+  // the rule belongs beside the traversal check rather than in each caller.
+  if (pagePath.includes('\\')) return 'path must not contain a backslash';
+  // eslint-disable-next-line no-control-regex -- control characters in a path
+  // are never legitimate and can smuggle line breaks into anything that logs,
+  // signs, or requests it.
+  if (/[\u0000-\u001f\u007f]/.test(pagePath)) return 'path must not contain control characters';
   if (/\.md$/i.test(pagePath)) return 'path is already a .md file';
   return null;
 }

@@ -307,4 +307,20 @@ describe('llms_full_txt — the second fixed markdown file', () => {
       /always published at \/llms-full\.txt/
     );
   });
+  // v1.14.1: a backslash resolves as a separator to a URL parser
+  // (new URL('/\\evil.com/x', 'https://site.com') → https://evil.com/x), and
+  // control characters smuggle line breaks into anything that logs or signs
+  // the path. Both belong here, not in each caller's own re-check.
+  it('refuses a backslash — it would resolve to a different host', () => {
+    expect(mdTwinPathReason('/\\evil.com/x')).toContain('backslash');
+    expect(mdTwinPathReason('/a\\b')).toContain('backslash');
+    expect(new URL('/\\evil.com/x', 'https://site.com').hostname).toBe('evil.com');
+  });
+
+  it('refuses control characters', () => {
+    expect(mdTwinPathReason('/a\n')).toContain('control');
+    expect(mdTwinPathReason('/a\u0000b')).toContain('control');
+    expect(mdTwinPathReason('/a\u007f')).toContain('control');
+  });
+
 });
