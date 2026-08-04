@@ -113,11 +113,12 @@ export async function analyticsSummary(deps: Pick<AgentDeps, 'db' | 'config' | '
       `SELECT substr(ts, 1, 10) AS date,
               SUM(CASE WHEN kind = 'crawler' THEN 1 ELSE 0 END) AS crawler,
               SUM(CASE WHEN kind = 'referral' THEN 1 ELSE 0 END) AS referral,
-              SUM(CASE WHEN kind = 'agent' THEN 1 ELSE 0 END) AS agent
+              SUM(CASE WHEN kind = 'agent' THEN 1 ELSE 0 END) AS agent,
+              SUM(CASE WHEN kind = 'search' THEN 1 ELSE 0 END) AS search
        FROM aeo_hits WHERE ts >= ? GROUP BY date ORDER BY date`
     )
       .bind(aeoSince)
-      .all<{ date: string; crawler: number; referral: number; agent: number }>()
+      .all<{ date: string; crawler: number; referral: number; agent: number; search: number }>()
       .then((r) => r.results)
       .catch(() => []),
     deps.db.prepare('SELECT week_start, kind, bot, served, hits FROM aeo_weekly ORDER BY week_start, kind, bot, served')

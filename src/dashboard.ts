@@ -32,12 +32,18 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   :root {
     --bg: #f7f7f8; --panel: #fff; --ink: #16181d; --muted: #6b7280; --line: #e5e7eb;
     --accent: #2563eb; --ok: #15803d; --warn: #b45309; --bad: #b91c1c; --chip: #f1f5f9;
+    /* The traffic chart's fourth series needs its OWN token. The search series
+       was drawn in --muted, which is also the axis, legend and caption text
+       colour, so the one HUMAN series was the only one a reader could mistake
+       for chrome. */
+    --search: #7c3aed;
     --shadow: 0 1px 2px rgba(0,0,0,.04), 0 1px 3px rgba(0,0,0,.06);
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #0d0f13; --panel: #16181d; --ink: #e8eaed; --muted: #9aa0aa; --line: #262a31;
       --accent: #5b8cff; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --chip: #1e2229;
+      --search: #a78bfa;
       --shadow: none;
     }
   }
@@ -297,6 +303,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
       ['GSC rows', num(gsc.n) + (gsc.latest ? ' · to ' + gsc.latest : ''), '#analytics'],
       ['AI crawls 7d', tel.active ? crawls : '—', '#analytics'],
       ['AI referrals 7d', tel.active ? num(tel.referral7d) : '—', '#analytics'],
+      ['Search referrals 7d', tel.active ? num(tel.search7d) : '—', '#analytics'],
       ['Cited', cit.total ? (num(cit.cited) + '/' + num(cit.total)) : ((cit.queries && (cit.engines || []).length) ? 'pending' : 'off'), '#analytics']
     ];
     el('cards').innerHTML = cards.map(function (c) {
@@ -592,20 +599,20 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
 
   function buildAeo(a) {
     var daily = (a && a.daily) || [], bots = (a && a.topBots7d) || [];
-    if (!daily.length && !bots.length) return panel('AI traffic (30d)', '<div class="empty">No AI-traffic telemetry yet.</div>');
+    if (!daily.length && !bots.length) return panel('AI & search traffic (30d)', '<div class="empty">No AI-traffic telemetry yet.</div>');
     var inner = '';
     if (daily.length) {
       var W = 860, H = 170, PL = 30, PR = 10, PT = 12, PB = 22;
       var max = 1;
-      daily.forEach(function (d) { max = Math.max(max, (d.crawler || 0) + (d.referral || 0) + (d.agent || 0)); });
+      daily.forEach(function (d) { max = Math.max(max, (d.crawler || 0) + (d.referral || 0) + (d.agent || 0) + (d.search || 0)); });
       var bw = (W - PL - PR) / daily.length;
       var bars = daily.map(function (d, i) {
         var x = PL + i * bw, y = H - PB, out = '';
-        [['crawler', d.crawler || 0, 'var(--accent)'], ['referral', d.referral || 0, 'var(--ok)'], ['agent', d.agent || 0, 'var(--warn)']].forEach(function (s) {
+        [['crawler', d.crawler || 0, 'var(--accent)'], ['referral', d.referral || 0, 'var(--ok)'], ['agent', d.agent || 0, 'var(--warn)'], ['search', d.search || 0, 'var(--search)']].forEach(function (s) {
           var h = (s[1] / max) * (H - PT - PB); y -= h;
           if (h > 0) out += '<rect x="' + (x + 1).toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + Math.max(1, bw - 2).toFixed(1) + '" height="' + h.toFixed(1) + '" style="fill:' + s[2] + '"/>';
         });
-        out += '<rect x="' + x.toFixed(1) + '" y="' + PT + '" width="' + bw.toFixed(1) + '" height="' + (H - PT - PB) + '" fill="transparent"><title>' + d.date + ' — ' + (d.crawler || 0) + ' crawler, ' + (d.referral || 0) + ' referral, ' + (d.agent || 0) + ' agent</title></rect>';
+        out += '<rect x="' + x.toFixed(1) + '" y="' + PT + '" width="' + bw.toFixed(1) + '" height="' + (H - PT - PB) + '" fill="transparent"><title>' + d.date + ' — ' + (d.crawler || 0) + ' crawler, ' + (d.referral || 0) + ' referral, ' + (d.agent || 0) + ' agent, ' + (d.search || 0) + ' search</title></rect>';
         return out;
       }).join('');
       inner += '<div class="svgwrap"><svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:auto" preserveAspectRatio="xMidYMid meet">'
@@ -613,13 +620,13 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
         + '<text x="' + PL + '" y="' + (H - 2) + '" style="fill:var(--muted)" font-size="9">' + daily[0].date + '</text>'
         + '<text x="' + (W - PR) + '" y="' + (H - 2) + '" text-anchor="end" style="fill:var(--muted)" font-size="9">' + daily[daily.length - 1].date + '</text>'
         + bars + '</svg></div>'
-        + '<div class="legend"><span><i style="background:var(--accent)"></i>crawler</span><span><i style="background:var(--ok)"></i>referral</span><span><i style="background:var(--warn)"></i>agent</span></div>';
+        + '<div class="legend"><span><i style="background:var(--accent)"></i>crawler</span><span><i style="background:var(--ok)"></i>referral</span><span><i style="background:var(--warn)"></i>agent</span><span><i style="background:var(--search)"></i>search</span></div>';
     }
     if (bots.length) {
       inner += '<div class="muted" style="font-size:12px;margin-top:8px">Top AI bots (7d): '
         + bots.map(function (b) { return esc(b.bot) + ' (' + b.hits + ')'; }).join(', ') + '</div>';
     }
-    return panel('AI traffic (30d)', inner);
+    return panel('AI & search traffic (30d)', inner);
   }
 
   function buildCitations(c) {

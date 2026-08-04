@@ -19,17 +19,19 @@ export type TelemetrySummary = {
   lastHit: string | null;
   crawler7d: { bot: string; n: number }[];
   referral7d: number;
+  search7d: number;
   md7d: number;
 };
 
 export async function telemetrySummary(db: D1Database): Promise<TelemetrySummary> {
   const since = isoDaysAgo(7);
-  const [last, crawlers, referrals, md] = await Promise.all([
+  const [last, crawlers, referrals, searches, md] = await Promise.all([
     db.prepare('SELECT MAX(ts) AS ts FROM aeo_hits').first<{ ts: string | null }>(),
     db.prepare("SELECT bot, COUNT(*) AS n FROM aeo_hits WHERE kind = 'crawler' AND ts >= ? GROUP BY bot ORDER BY n DESC")
       .bind(since)
       .all<{ bot: string; n: number }>(),
     db.prepare("SELECT COUNT(*) AS n FROM aeo_hits WHERE kind = 'referral' AND ts >= ?").bind(since).first<{ n: number }>(),
+    db.prepare("SELECT COUNT(*) AS n FROM aeo_hits WHERE kind = 'search' AND ts >= ?").bind(since).first<{ n: number }>(),
     db.prepare("SELECT COUNT(*) AS n FROM aeo_hits WHERE served = 'md' AND ts >= ?").bind(since).first<{ n: number }>(),
   ]);
   return {
@@ -37,6 +39,7 @@ export async function telemetrySummary(db: D1Database): Promise<TelemetrySummary
     lastHit: last?.ts ?? null,
     crawler7d: crawlers.results,
     referral7d: referrals?.n ?? 0,
+    search7d: searches?.n ?? 0,
     md7d: md?.n ?? 0,
   };
 }

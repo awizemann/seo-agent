@@ -195,7 +195,7 @@ export async function statusData(deps: Pick<AgentDeps, 'db' | 'config' | 'secret
   // WITHOUT re-running db:init those tables don't exist and the sub-queries
   // throw. Degrade each to an inactive/empty block so /status still returns 200
   // (re-run `npm run db:init` — idempotent — to create them).
-  const emptyTelemetry = { active: false, lastHit: null, crawler7d: [] as { bot: string; n: number }[], referral7d: 0, md7d: 0 };
+  const emptyTelemetry = { active: false, lastHit: null, crawler7d: [] as { bot: string; n: number }[], referral7d: 0, search7d: 0, md7d: 0 };
   const [lastRun, findings, proposals, changes, gscRows, running, telemetry, latestCitations] = await Promise.all([
     deps.db.prepare('SELECT id, started_at, finished_at, url_count, ok, pipeline_done FROM crawl_runs ORDER BY id DESC LIMIT 1').first(),
     deps.db.prepare("SELECT severity, COUNT(*) AS n FROM findings WHERE status = 'open' GROUP BY severity").all(),

@@ -361,9 +361,39 @@ crawlers don't run JavaScript. The telemetry tap records it at the edge instead:
   known AI crawler (which bot, path, status, and whether the markdown twin /
   AI content lane / plain HTML was served), human clicks arriving with an AI
   engine Referer (chatgpt.com, perplexity.ai, claude.ai, gemini, copilot, …),
-  and markdown-lane responses. Ordinary traffic is never written. Fire-and-forget
+  human clicks arriving with a SEARCH engine Referer (Google incl. every ccTLD,
+  Bing, DuckDuckGo, Yahoo, Brave, Ecosia, Startpage, Qwant, Kagi, Mojeek,
+  Yandex, Baidu, Naver, Seznam), and markdown-lane responses. Ordinary traffic
+  is never written. Fire-and-forget
   via `waitUntil`, fail-open, pruned after 90 days.
-- **Read it:** dashboard cards (AI crawls / AI referrals, 7d), `GET /aeo/hits`,
+- **Four kinds** land in `aeo_hits.kind`: `crawler` (known AI-bot UA),
+  `referral` (human from an AI engine), `search` (human from an organic search
+  engine), `agent` (unknown client that negotiated markdown). Classification is
+  by referring **hostname**, anchored — both lists are tested against the host,
+  never against the full referrer URL, so a search for `is claude.ai good`
+  cannot be counted as an AI referral. An AI host that lives under a search
+  engine's domain — `gemini.google.com`, `copilot.microsoft.com` — is always
+  `referral`: the AI check runs first and wins. A same-site referrer is
+  internal navigation and is never recorded.
+- **The limit of host-level classification.** Everything above is decided from
+  the hostname alone, which is all a modern referrer carries. Where an AI
+  surface answers from the *same host* as that engine's ordinary web search, we
+  cannot tell them apart and the visit is recorded as `search`. That is the
+  case today for **Google AI Mode and AI Overviews** (`www.google.com`), **Bing
+  Copilot's in-page answers** (`www.bing.com`), DuckDuckGo's AI chat
+  (`duckduckgo.com`) and Kagi's assistant (`kagi.com`). Only the query string
+  would separate them, and we do not store or inspect it. So the honest
+  guarantee is narrower than "AI traffic is never relabelled as organic
+  search": *an AI referrer we can identify by host is never relabelled.* AI
+  answers served from a search engine's own search host are counted as search,
+  and your AI numbers are a floor, not a total.
+- **Only the referring HOSTNAME is stored** — never the path or query. Search
+  *terms* are not in the referrer and haven't been for years: browsers default
+  to `Referrer-Policy: strict-origin-when-cross-origin`, so a Google referral
+  arrives as `https://www.google.com/`. You learn which engine sent the visit,
+  never what they typed.
+- **Read it:** dashboard cards (AI crawls / AI referrals / search referrals,
+  7d), `GET /aeo/hits`,
   the `list_crawler_hits` MCP tool, and two low-noise findings —
   `ai_crawlers_silent` (tap active ≥14 days, zero AI-crawler hits) and
   `ai_crawler_errors` (a bot getting >20% errors on content responses —
@@ -406,7 +436,7 @@ dashboard, over the API, and via MCP.
 
 - **Search performance over time** — GSC clicks, impressions, CTR, and average
   position, summed across all pages, daily for 90 days.
-- **AI traffic** — daily crawler / referral / agent counts for 30 days, plus
+- **AI traffic** — daily crawler / referral / agent / search counts for 30 days, plus
   **write-once weekly rollups** (`aeo_weekly`): a completed ISO week is rolled up
   on the first run after it closes — while every hit is still inside the 90-day
   `aeo_hits` retention, so the write is complete — and never overwritten
@@ -601,7 +631,7 @@ All endpoints require `Authorization: Bearer <AGENT_TOKEN>` (the MCP endpoint to
 | `GET /changes` | The apply/revert journal |
 | `POST /changes/:id/revert` | Remove an override; the site falls back to its baked value; retires the source proposal |
 | `GET /overrides` | Current live override state from KV |
-| `GET /aeo/hits?days=7` | AI-traffic telemetry: crawler fetches, AI referrals, markdown-lane responses |
+| `GET /aeo/hits?days=7` | AI-traffic telemetry: crawler fetches, AI referrals, search referrals, markdown-lane responses |
 | `GET /aeo/citations` | Citation-probe results (engine × query: cited, rank, cited URL), newest first |
 | `POST /aeo/citations/run` | Probe all configured engines with every citation query now |
 | `GET /analytics/summary` | Metrics over time + per-change verdicts (see [Analytics](#analytics)) |

@@ -19,3 +19,4 @@ sessions/.index.json
 
 # Memophant — gitignored derived caches (code index, parser state).
 .memophant/
+exports/

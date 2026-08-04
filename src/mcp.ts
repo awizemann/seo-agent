@@ -154,7 +154,7 @@ const TOOLS: Tool[] = [
   {
     name: 'list_crawler_hits',
     description:
-      'Recent AI-traffic telemetry recorded by the site: AI crawler fetches (which bot, path, status, whether the markdown twin or AI content lane was served) and human referrals from AI engines. Empty until the site-side tap (TELEMETRY D1 binding) is wired up.',
+      'Recent AI-traffic telemetry recorded by the site: AI crawler fetches (which bot, path, status, whether the markdown twin or AI content lane was served), human referrals from AI engines, and human referrals from organic search engines (kind "search" — the referring host only, never search terms). Empty until the site-side tap (TELEMETRY D1 binding) is wired up.',
     inputSchema: {
       type: 'object',
       properties: { days: { type: 'number', description: 'Look-back window in days (default 7, max 90)' } },
@@ -178,7 +178,7 @@ const TOOLS: Tool[] = [
   {
     name: 'get_analytics',
     description:
-      'SEO/AEO metrics over time for the dashboard Analytics view: GSC clicks/impressions/CTR/position daily for 90d (all pages summed, active=false when GSC is off), AI-traffic daily counts (30d) + permanent weekly rollups + top AI bots (7d), citation-probe history, an open-findings-by-severity daily series (90d), and every applied change with its latest helped/hurt/neutral/insufficient_data verdict.',
+      'SEO/AEO metrics over time for the dashboard Analytics view: GSC clicks/impressions/CTR/position daily for 90d (all pages summed, active=false when GSC is off), AI-traffic daily counts (30d: crawler / referral / agent / search) + permanent weekly rollups + top AI bots (7d), citation-probe history, an open-findings-by-severity daily series (90d), and every applied change with its latest helped/hurt/neutral/insufficient_data verdict.',
     inputSchema: { type: 'object', properties: {} },
     handler: (deps) => analyticsSummary(deps),
   },

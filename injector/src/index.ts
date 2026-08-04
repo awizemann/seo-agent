@@ -49,17 +49,84 @@ type ResourceOverride = { contentType: string; body: string };
 // ---------------------------------------------------------------------------
 // AEO telemetry tap (optional) — bind the seo-agent's D1 database as TELEMETRY
 // and the injector records AI-relevant traffic into its `aeo_hits` table:
-// known AI-crawler UAs, human referrals from AI engines, and markdown-lane
-// responses. Nothing else is ever recorded. Fire-and-forget via waitUntil and
-// swallowed errors: telemetry can never affect serving. No binding → no-op.
+// known AI-crawler UAs, human referrals from AI engines, human referrals from
+// search engines, and markdown-lane responses. Nothing else is ever recorded.
+// Fire-and-forget via waitUntil and swallowed errors: telemetry can never
+// affect serving. No binding → no-op.
+//
+// PRIVACY GUARANTEE: only the referrer's HOSTNAME is ever stored — never the
+// path, never the query string. A referrer URL can carry personal data, and the
+// only question this table answers is WHICH ENGINE sent the visitor. This is a
+// promise about the data we keep, not an accident of the implementation.
 // ---------------------------------------------------------------------------
 
 type D1Lite = { prepare(q: string): { bind(...v: unknown[]): { run(): Promise<unknown> } } };
 
 const AI_BOT_RE =
   /GPTBot|OAI-SearchBot|ChatGPT-User|ClaudeBot|Claude-User|Claude-SearchBot|claude-web|anthropic-ai|PerplexityBot|Perplexity-User|meta-externalagent|meta-externalfetcher|Meta-WebIndexer|Amazonbot|CCBot|Bytespider|MistralAI-User|DuckAssistBot|YouBot|LinerBot|Applebot(?!-Extended)/i;
+/**
+ * AI-engine referrers, matched against the referrer HOSTNAME and ANCHORED on
+ * both ends — the same discipline as SEARCH_REFERRER_RE below, and for the same
+ * two reasons.
+ *
+ * IT USED TO BE TESTED AGAINST THE FULL REFERRER URL, unanchored, and that was
+ * wrong in both directions at once:
+ *
+ *   * FALSE POSITIVES INFLATED THE ONE NUMBER THIS PRODUCT SELLS. A plain
+ *     Google search for `is claude.ai good` arrives as
+ *     `https://www.google.com/search?q=is+claude.ai+good`; the substring
+ *     `claude.ai` matched, the AI branch won, and a human organic-search visit
+ *     was stored as `kind='referral'` from host `www.google.com`. The row is
+ *     self-contradictory — a referral kind against a search host — so nothing
+ *     downstream can audit or repair it later. `https://someblog.example/
+ *     post-about-claude.ai` did the same. Worse, the match was on
+ *     ATTACKER-SUPPLIED TEXT: anyone could mint AI referrals by crafting a
+ *     `Referer` path.
+ *   * IT WAS ALSO A PRIVACY LEAK IN SPIRIT. The guarantee above is that we only
+ *     ever look at, and store, the hostname. Testing a regex against the query
+ *     string is inspecting exactly the bytes we promise not to use.
+ *
+ * The anchor is what makes the `else if` ordering below a real guarantee rather
+ * than a comment: `gemini.google.com` matches here and `www.google.com` cannot,
+ * because the whole host must match, not some substring of a URL.
+ *
+ * The optional leading-label group keeps every genuine AI host classifying as
+ * `referral` (`www.perplexity.ai`, `chat.deepseek.com`) while still refusing
+ * `notclaude.ai` — a prefix label has to end in a dot to count.
+ */
 const AI_REFERRER_RE =
-  /chatgpt\.com|chat\.openai\.com|perplexity\.ai|claude\.ai|gemini\.google\.com|bard\.google\.com|copilot\.microsoft\.com|copilot\.com|grok\.com|meta\.ai|deepseek\.com|you\.com|poe\.com/i;
+  /^(?:[a-z0-9-]+\.)*(?:chatgpt\.com|chat\.openai\.com|perplexity\.ai|claude\.ai|gemini\.google\.com|bard\.google\.com|copilot\.microsoft\.com|copilot\.com|grok\.com|meta\.ai|deepseek\.com|you\.com|poe\.com|duck\.ai)$/i;
+
+/**
+ * Organic SEARCH-engine referrers, matched against the referrer HOSTNAME only
+ * (never the full URL — see the privacy guarantee above). Anchored on both
+ * ends, so `google.com` matches but `gemini.google.com` cannot.
+ *
+ * Selection criteria — an entry earns its place only if it is (a) a general
+ * web search engine a human can arrive from, and (b) distinguishable by host
+ * alone. That rules out:
+ *   - non-search subdomains of the same brand: `news.google.com`,
+ *     `blog.naver.com`, `mail.yandex.com` are not organic search, so the Google
+ *     and Naver patterns admit no arbitrary subdomain;
+ *   - AI surfaces that live on a search engine's own host. `gemini.google.com`
+ *     and `copilot.microsoft.com` have their own hosts and are matched by
+ *     AI_REFERRER_RE first (see the ordering below). But DuckDuckGo's AI chat
+ *     and Kagi's assistant answer from the SAME host as their search results
+ *     and differ only in the query string — which the referrer does not carry.
+ *     Those referrals are counted as `search`; there is no host-level signal
+ *     that could separate them and we will not inspect the query to find one.
+ *
+ * Google ccTLDs are matched structurally rather than enumerated: a 2–3 letter
+ * TLD with an optional second level (`google.com`, `google.de`, `google.co.uk`,
+ * `google.com.br`), with only `www.` allowed in front.
+ *
+ * What this CANNOT tell you: the search terms. Browsers send
+ * `Referrer-Policy: strict-origin-when-cross-origin` by default, which strips
+ * path and query cross-origin, so a Google referral arrives as
+ * `https://www.google.com/`. We record WHICH ENGINE, never what was typed.
+ */
+const SEARCH_REFERRER_RE =
+  /^(?:(?:www\.)?google\.[a-z]{2,3}(?:\.[a-z]{2})?|(?:www\.|cn\.)?bing\.com|(?:[a-z0-9-]+\.)?duckduckgo\.com|(?:[a-z]{2}\.)?search\.yahoo\.com|search\.yahoo\.co\.jp|search\.brave\.com|(?:www\.)?ecosia\.org|(?:www\.)?startpage\.com|(?:www\.|lite\.)?qwant\.com|(?:www\.)?kagi\.com|(?:www\.)?mojeek\.com|(?:www\.)?yandex\.(?:com|ru|by|kz|ua|eu|com\.tr)|(?:www\.|m\.)?baidu\.com|(?:m\.)?search\.naver\.com|(?:www\.)?search\.seznam\.cz)$/i;
 
 function tapAeo(env: Env, ctx: ExecutionContext, request: Request, path: string, status: number, served: string): void {
   try {
@@ -70,16 +137,47 @@ function tapAeo(env: Env, ctx: ExecutionContext, request: Request, path: string,
     if (/seo-agent/i.test(ua)) return; // the agent's own crawler/sampler — never self-count
     const bot = ua.match(AI_BOT_RE)?.[0] ?? null;
     let refHost: string | null = null;
+    let refKind: 'referral' | 'search' | null = null;
     const ref = request.headers.get('referer');
-    if (ref && AI_REFERRER_RE.test(ref)) {
+    if (ref) {
+      let host: string | null = null;
       try {
-        refHost = new URL(ref).hostname;
+        host = new URL(ref).hostname.toLowerCase();
       } catch {
-        refHost = null;
+        host = null;
+      }
+      let selfHost: string | null = null;
+      try {
+        selfHost = new URL(request.url).hostname.toLowerCase();
+      } catch {
+        selfHost = null;
+      }
+      // Internal navigation is not inbound traffic: a same-site referrer is
+      // never classified, whatever the host looks like.
+      if (host && host !== selfHost) {
+        // ORDER IS LOAD-BEARING. The AI check runs FIRST and wins outright.
+        // AI_REFERRER_RE contains hosts that live under a search engine's
+        // domain (gemini.google.com, bard.google.com, copilot.microsoft.com);
+        // if the search test ran first, or ran at all after an AI match, the
+        // exact traffic this tap exists to measure would be relabelled as
+        // organic search. `else if` — never a second, independent test.
+        //
+        // BOTH TESTS TAKE `host`, never `ref`. The ordering guarantee above is
+        // only true when both sides are anchored host matches: an unanchored
+        // test against the full URL made `www.google.com/search?q=claude.ai`
+        // win the AI branch, which is the precise inversion this comment
+        // claims to prevent.
+        if (AI_REFERRER_RE.test(host)) {
+          refHost = host;
+          refKind = 'referral';
+        } else if (SEARCH_REFERRER_RE.test(host)) {
+          refHost = host;
+          refKind = 'search';
+        }
       }
     }
-    if (!bot && !refHost && served !== 'md') return;
-    const kind = bot ? 'crawler' : refHost ? 'referral' : 'agent';
+    if (!bot && !refKind && served !== 'md') return;
+    const kind = bot ? 'crawler' : (refKind ?? 'agent');
     if (db) {
       ctx.waitUntil(
         db

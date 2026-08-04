@@ -99,7 +99,21 @@ CREATE INDEX IF NOT EXISTS idx_gsc_page ON gsc_daily (page, date);
 -- edge Worker (optional TELEMETRY / AEO_TELEMETRY D1 binding, fire-and-forget
 -- via waitUntil, fail-open). The agent reads, aggregates, and prunes (90 days).
 -- kind: 'crawler' = known AI-bot UA; 'referral' = human arriving from an AI
--- engine (Referer); 'agent' = unknown client that negotiated markdown.
+-- engine (Referer); 'search' = human arriving from an organic search engine
+-- (Referer — Google/Bing/DDG/…); 'agent' = unknown client that negotiated
+-- markdown. Both lists are matched against the referring HOST, anchored (never
+-- against the full URL). A HOST on both lists (gemini.google.com,
+-- copilot.microsoft.com) is always 'referral': the AI check runs first and
+-- wins. Same-site referrers are never recorded.
+-- THE LIMIT OF THIS GUARANTEE, stated because the column cannot: an AI surface
+-- answering from the SAME HOST as that engine's web search is indistinguishable
+-- here and lands in 'search'. That covers Google AI Mode / AI Overviews
+-- (www.google.com), Bing Copilot's in-page answers (www.bing.com), DuckDuckGo's
+-- AI chat and Kagi's assistant. Only the query string could separate them and
+-- we do not store it (see below). 'referral' is therefore a FLOOR on AI
+-- traffic, not a total — do not read this column as "all AI traffic".
+-- referrer: the referring HOSTNAME only — never the path or query string, so
+-- no search terms and no referrer-borne personal data are ever stored.
 CREATE TABLE IF NOT EXISTS aeo_hits (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL,
