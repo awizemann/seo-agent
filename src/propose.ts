@@ -19,9 +19,42 @@ import type { AgentDeps } from './deps.js';
 // lands on. Exported so the "Draft fix" action (actions.draftFinding), the
 // per-finding `draftable` flag and the candidate query gate on the exact same
 // sets — a button that can't produce a draft never shows.
-export const DESCRIPTION_RULES = new Set(['missing_description', 'short_description', 'long_description', 'truncated_description']);
+// `search_impressions_no_clicks` is a DESCRIPTION rule, and the choice is not a
+// coin flip. That finding only fires on a page already ranking inside page one
+// (it is raised host-side from Search Console data — the library never produces
+// it, but the library is what drafts it), so the page's title is load-bearing
+// for the ranking that made the click reachable at all, and rewriting it to
+// chase a click can cost the position. The description is the one part of the
+// snippet Google does not rank on, so it is click-appeal upside with no ranking
+// risk. Title experiments on a page-one result belong to a human.
+export const DESCRIPTION_RULES = new Set([
+  'missing_description', 'short_description', 'long_description', 'truncated_description',
+  'search_impressions_no_clicks',
+]);
 export const TITLE_RULES = new Set(['long_title', 'missing_title', 'duplicate_title', 'doubled_title_suffix']);
 export const PROPOSABLE_RULES = new Set([...DESCRIPTION_RULES, ...TITLE_RULES]);
+
+/**
+ * Description rules whose fix is a REWRITE of a description that is already
+ * present and already valid — the page has a description, it is the right
+ * length, and it is still not doing its job. For these a draft that comes back
+ * identical to the current value is not a fix, so it is rejected (see the
+ * validator in draftWithTrace) rather than published as a proposal a reviewer
+ * would approve to no effect.
+ *
+ * A subset of DESCRIPTION_RULES, never a separate lane: everything else about
+ * drafting, validating and applying these is the description path unchanged.
+ */
+export const REWRITE_DESCRIPTION_RULES = new Set(['search_impressions_no_clicks']);
+
+/**
+ * Two descriptions are "the same" up to the noise a redraft can introduce
+ * without changing what a searcher reads — case, surrounding whitespace and
+ * internal whitespace runs. Not a similarity score: this only has to catch the
+ * model handing back the string we put in the prompt.
+ */
+export const sameDescription = (a: string, b: string | null | undefined): boolean =>
+  !!b && a.trim().replace(/\s+/g, ' ').toLowerCase() === b.trim().replace(/\s+/g, ' ').toLowerCase();
 
 export type DraftField = 'description' | 'title';
 
@@ -285,8 +318,42 @@ export type DraftTrace = { rawShape: string; raw: string; sanitized: string; rea
 
 type DraftInput = { path: string; title: string | null; current: string | null; rule?: string; detail?: string | null; description?: string | null };
 
+/**
+ * What a description rule asks the drafter to do, when the default brief
+ * ("write the meta description") would produce the wrong kind of draft.
+ *
+ * Only the rules whose brief actually differs appear here; the four
+ * length/presence rules are exactly the original lane — there is nothing to say
+ * beyond the length window the system prompt already states — and they fall
+ * through to the default. Keeping the map sparse means adding an entry is a
+ * deliberate statement that this rule needs a different instruction, not
+ * boilerplate every rule has to carry.
+ */
+const DESCRIPTION_RULE_TASK: Record<string, string> = {
+  // The page is ON PAGE ONE and is not being clicked, so the existing
+  // description is not wrong, it is unpersuasive — a distinction the default
+  // brief cannot express. The instruction is about the READER'S DECISION, and
+  // it deliberately does not invite invention: a description that promises
+  // something the page does not deliver converts one bad number into a worse
+  // one. "Must not restate" is enforced, not merely requested (see the
+  // unchanged check in draftWithTrace) — a redraft identical to what we already
+  // serve is a fix that fixes nothing.
+  search_impressions_no_clicks:
+    'Google already shows this page high in its results, but people are reading this description and choosing '
+    + 'something else. Write a different one that says plainly what the reader gets on this page and why it '
+    + 'answers what they were searching for. Lead with the substance, not the site. Promise nothing the page '
+    + 'does not actually deliver, and do not restate the current description.',
+};
+
 const descriptionUserPrompt = (input: DraftInput, context: string): string =>
-  `Page path: ${input.path}\nPage title: ${input.title ?? '(none)'}\nCurrent description: ${input.current ?? '(none)'}${context ? `\nPage content excerpt:\n${context}` : ''}\n\nWrite the meta description.`;
+  [
+    `Page path: ${input.path}`,
+    `Page title: ${input.title ?? '(none)'}`,
+    `Current description: ${input.current ?? '(none)'}`,
+    ...(context ? [`Page content excerpt:\n${context}`] : []),
+    '',
+    DESCRIPTION_RULE_TASK[input.rule ?? ''] ?? 'Write the meta description.',
+  ].join('\n');
 
 // Per-rule routing: the finding's own detail is what distinguishes "too long"
 // from "identical to four other pages", so the brief carries the rule's task
@@ -315,8 +382,19 @@ export async function draftWithTrace(
   // No rule (the dry-run endpoint) means the original lane: a description.
   const field: DraftField = input.rule ? fieldForRule(input.rule) ?? 'description' : 'description';
   const context = await pageContext(cfg, input.path);
-  const validate = (text: string): string | null =>
-    field === 'title' ? invalidTitleReason(text, cfg, input.current) : invalidReason(text, cfg);
+  // The rewrite rules ask for a DIFFERENT description, not merely a valid one,
+  // so "unchanged from what we serve" is a validation failure for them and the
+  // retry turn gets to say so. It is not applied to the length/presence rules:
+  // there, an identical draft is already impossible (a `short_description`
+  // redraft that matched the current value could not clear VALUE_MIN), and
+  // spending the check on them would only add a way for a legitimate draft to
+  // be refused.
+  const wantsRewrite = !!input.rule && REWRITE_DESCRIPTION_RULES.has(input.rule);
+  const validate = (text: string): string | null => {
+    if (field === 'title') return invalidTitleReason(text, cfg, input.current);
+    if (wantsRewrite && sameDescription(text, input.current)) return 'unchanged from the current description';
+    return invalidReason(text, cfg);
+  };
   const messages = [
     { role: 'system', content: field === 'title' ? titleSystemPrompt(cfg) : systemPrompt(cfg) },
     { role: 'user', content: field === 'title' ? titleUserPrompt(input, context) : descriptionUserPrompt(input, context) },

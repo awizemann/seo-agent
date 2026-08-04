@@ -45,7 +45,13 @@ Daily cron (and `POST /run` on demand):
    different from what we serve today". `doubled_title_suffix` needs no model at all:
    dropping the repeated suffix has one right answer, so it is drafted deterministically
    and reviewed through the same proposal flow. Invalid drafts are dropped and the
-   finding re-enqueues next run.
+   finding re-enqueues next run. A host that raises its own findings can borrow the
+   pipeline: `search_impressions_no_clicks` — a page ranking on page one that nobody
+   clicks — drafts a **description**, because the description is the part of the snippet
+   Google does not rank on and rewriting the title of a page-one result risks the
+   ranking that made the click reachable. Its brief is about the click rather than the
+   length, and a draft that comes back identical to the description already served is
+   rejected, since a rewrite that changes nothing fixes nothing.
 4. **Act** — approved proposals become KV overrides (`override:<path>` →
    `{"description": "...", "title": "..."}`) that the site's injector merges over its
    computed meta. Live within the injector's KV cache TTL. Nothing auto-applies unless
