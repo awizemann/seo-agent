@@ -6,10 +6,39 @@
  * on the following run by the same mechanism.
  */
 
-import type { PageSnapshot } from './crawl.js';
+import type { Discovery, PageSnapshot } from './crawl.js';
 import type { AgentDeps } from './deps.js';
 
 export type Triggered = { path: string; rule: string; severity: string; detail: string };
+
+/**
+ * The discovery sense: how this run found its URLs. In `sitemap` mode there is
+ * nothing to say. In `homepage_crawl` mode the site has no usable sitemap —
+ * which is a real, if low-severity, SEO condition AND the explanation for why
+ * the audit's page list may be short, so it is said once, on `/`, in the same
+ * findings lifecycle as everything else (it auto-resolves the first run a
+ * sitemap parses).
+ *
+ * Informational only for now: there is no field to draft, so `sitemap_missing`
+ * is deliberately absent from propose.ts's rule sets and `fieldForRule` returns
+ * null for it — a host computing `draftable` from that gets false with no
+ * special case. When sitemap generation ships, this becomes its trigger.
+ */
+export function discoveryFindings(discovery: Discovery): Triggered[] {
+  if (discovery.mode !== 'homepage_crawl') return [];
+  return [
+    {
+      path: '/',
+      rule: 'sitemap_missing',
+      severity: 'low',
+      detail:
+        `${discovery.reason}. A sitemap is the list of pages you want search engines to read, ` +
+        `with when each last changed — without one they have to guess by following links. ` +
+        `We crawled from your homepage instead and found ${discovery.pages} ` +
+        `${discovery.pages === 1 ? 'page' : 'pages'}; any page nothing links to would not be in that count.`,
+    },
+  ];
+}
 
 const DESCRIPTION_MIN = 70;
 const DESCRIPTION_MAX = 160;

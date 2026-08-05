@@ -5,7 +5,7 @@
  */
 
 import { runCrawl, prunePageSnapshots } from './crawl.js';
-import { runRules, validateTitle, type Triggered } from './rules.js';
+import { runRules, discoveryFindings, validateTitle, type Triggered } from './rules.js';
 import { aeoChecks } from './aeo.js';
 import { enqueueCandidates, draftWithTrace, invalidReason, fieldForRule } from './propose.js';
 import { findBannedTerm, type SiteConfig } from './config.js';
@@ -80,12 +80,14 @@ export async function startRun(deps: AgentDeps, waitUntil: (p: Promise<unknown>)
 }
 
 export async function runPipeline(deps: AgentDeps, runId: number) {
-  const { snapshots } = await runCrawl(deps, runId);
+  const { snapshots, discovery } = await runCrawl(deps, runId);
   try {
     // Sense modules share the findings lifecycle but are isolated — a failure
     // in any of them degrades to zero findings from that sense, never a
     // failed run.
-    const extra: Triggered[] = [];
+    // The discovery sense is pure (it reads the crawl's own result, does no
+    // I/O) so it needs no isolation wrapper.
+    const extra: Triggered[] = [...discoveryFindings(discovery)];
     const sense = async (name: string, fn: () => Promise<Triggered[]>) => {
       try {
         extra.push(...(await fn()));
@@ -169,7 +171,7 @@ export async function runPipeline(deps: AgentDeps, runId: number) {
       console.error(JSON.stringify({ evt: 'gsc_ingest_error', error: err instanceof Error ? err.message : String(err) }));
       gsc = { error: err instanceof Error ? err.message : String(err) };
     }
-    return { runId, urls: snapshots.length, rules, proposals, gsc, citations };
+    return { runId, urls: snapshots.length, discovery, rules, proposals, gsc, citations };
   } finally {
     // Mark the run finished whether the post-crawl stages succeeded or not, so
     // it stops reading as "in progress" the moment real work is done.

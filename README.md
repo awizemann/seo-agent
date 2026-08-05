@@ -27,11 +27,16 @@ Daily cron (and `POST /run` on demand):
 1. **Crawl** — fetch every sitemap URL, parse the delivered head with HTMLRewriter
    (title, description, canonical, og:image, og:type, JSON-LD types, robots), snapshot
    to D1. The run-over-run diff detects new/removed pages — including pages that appear
-   with no deploy (e.g. scheduled content going live at midnight).
+   with no deploy (e.g. scheduled content going live at midnight). No usable sitemap
+   (missing, empty, or unparseable)? The crawl falls back to a bounded same-origin
+   breadth-first link crawl from `/` — robots.txt and `nofollow` honoured, at most
+   3 levels deep and never more pages than the page cap — and records which
+   discovery mode ran.
 2. **Diagnose** — rules produce findings keyed `(path, rule)` with an open/auto-resolve
    lifecycle: injection regressions, missing/short/long descriptions, canonical
    mismatches, sitemap URLs that error or redirect, duplicate titles, missing Article
-   JSON-LD, noindex-in-sitemap, long titles, new/removed pages — plus the
+   JSON-LD, noindex-in-sitemap, long titles, new/removed pages, `sitemap_missing`
+   (the site has no sitemap and was crawled from its homepage instead) — plus the
    [AEO/GEO checks](#aeo--geo-checks-ai-answer-engines): llms.txt health, robots.txt
    AI-crawler policy, and an AI-user-agent deliverability sample.
 3. **Generate** — a run *enqueues* one drafting job per description- or title-quality
@@ -64,7 +69,9 @@ Daily cron (and `POST /run` on demand):
 
 Requirements: a Cloudflare account on the **Workers Paid plan** (the drafting queue
 requires it), wrangler ≥ 4, Node ≥ 18, and a site that serves a `sitemap.xml` — a plain
-`<urlset>`, or a `<sitemapindex>` whose child sitemaps are fetched one level deep — and an
+`<urlset>`, or a `<sitemapindex>` whose child sitemaps are fetched one level deep. A site
+with no sitemap still audits (the homepage-crawl fallback above), it just gets a
+`sitemap_missing` finding. You also need an
 edge injector able to read KV overrides (see [below](#connecting-your-site-the-injector-side)).
 
 ```sh
@@ -105,7 +112,8 @@ prompt, answer its three questions, and a working setup lands in about ten minut
 Set up https://github.com/awizemann/seo-agent as the SEO/AEO agent for my site.
 
 Ask me these three things before you start (don't guess):
-1. SITE_URL — the site to manage. It must serve a sitemap.xml.
+1. SITE_URL — the site to manage. A sitemap.xml is strongly preferred; without one
+   the crawl falls back to a bounded link crawl from the homepage.
 2. How the site is fronted: (a) a Cloudflare Worker I can add middleware to, or
    (b) a static/other origin behind Cloudflare — then use the ready-made proxy
    injector in injector/ on a route in front of it.

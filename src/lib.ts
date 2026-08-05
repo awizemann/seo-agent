@@ -33,7 +33,7 @@ export { depsFromEnv } from './deps.js';
 // run row, or returns null when a run is already in flight.
 export { startRun, claimRun, runPipeline, statusData } from './actions.js';
 export { runCrawl, prunePageSnapshots } from './crawl.js';
-export { runRules } from './rules.js';
+export { runRules, discoveryFindings } from './rules.js';
 export { aeoChecks } from './aeo.js';
 export { ingestGsc } from './gsc.js';
 export { impactFindings } from './impact.js';
@@ -121,7 +121,7 @@ export type { DraftField } from './propose.js';
 // Data types appearing in the signatures above, so consumers never need to
 // reach past this module.
 // ---------------------------------------------------------------------------
-export type { PageSnapshot } from './crawl.js';
+export type { PageSnapshot, Discovery, DiscoveryMode } from './crawl.js';
 export type { Triggered } from './rules.js';
 export type { Remediation, RemediationState } from './actions.js';
 export type { Phase, Verdict } from './impact.js';
