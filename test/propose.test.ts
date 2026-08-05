@@ -319,3 +319,25 @@ describe('decideProposal — approving a draft that predates a vocabulary change
     expect(await decideProposal(s.deps, 1, 'approve')).toMatchObject({ ok: true, status: 'approved' });
   });
 });
+
+// ---------------------------------------------------------------------------
+// The public surface — the drafting dedupe key is exported, not mirrored.
+// ---------------------------------------------------------------------------
+describe('lib entry point exposes the drafting dedupe key', () => {
+  it('exports the same fieldForRule the drafter dedupes on', async () => {
+    const lib = await import('../src/lib');
+    const propose = await import('../src/propose');
+    // Identity, not equivalence: a host importing this is provably calling the
+    // function `draftAndCreate` itself calls, so no mirror can drift from it.
+    expect(lib.fieldForRule).toBe(propose.fieldForRule);
+  });
+
+  it('answers the field for every proposable rule, and null otherwise', async () => {
+    const { fieldForRule } = await import('../src/lib');
+    const { PROPOSABLE_RULES, TITLE_RULES } = await import('../src/propose');
+    for (const rule of PROPOSABLE_RULES) {
+      expect(fieldForRule(rule)).toBe(TITLE_RULES.has(rule) ? 'title' : 'description');
+    }
+    expect(fieldForRule('llms_txt_missing')).toBeNull();
+  });
+});

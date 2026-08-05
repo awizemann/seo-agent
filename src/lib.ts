@@ -105,6 +105,17 @@ export { withTitleSuffix, storedOverrideValue } from './overrides.js';
 // Drafting — the queue consumer half, and the validator the drafts must pass.
 export { draftAndCreate, invalidReason, type DraftAndCreateResult } from './propose.js';
 export type { DraftJob, DraftTrace } from './propose.js';
+// `fieldForRule` is the drafting DEDUPE KEY, and that is why it is public.
+// `draftAndCreate` resolves a job's field as `job.field ?? fieldForRule(job.rule)
+// ?? 'description'` and dedupes on the result, so any host that serialises or
+// claims drafting work per (path, field) — as a multi-tenant queue consumer
+// must — has to derive the field exactly the way this does. Reimplementing the
+// rule sets host-side is a mirror that drifts silently the moment a release
+// adds a rule, and a claim on a drifted key guards a collision that is not the
+// one that happens. The FUNCTION is exported rather than the rule sets on
+// purpose: one answer, and no second copy of the mapping to keep in step.
+export { fieldForRule } from './propose.js';
+export type { DraftField } from './propose.js';
 
 // ---------------------------------------------------------------------------
 // Data types appearing in the signatures above, so consumers never need to

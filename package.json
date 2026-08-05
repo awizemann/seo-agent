@@ -1,13 +1,22 @@
 {
   "name": "seo-agent",
-  "version": "1.17.0",
+  "version": "1.17.1",
   "description": "An automated, Cloudflare-based SEO agent for large content sites.",
   "type": "module",
   "main": "src/lib.ts",
   "exports": {
-    ".": { "types": "./src/lib.ts", "default": "./src/lib.ts" },
-    "./worker": { "types": "./src/index.ts", "default": "./src/index.ts" },
-    "./lib": { "types": "./src/lib.ts", "default": "./src/lib.ts" }
+    ".": {
+      "types": "./src/lib.ts",
+      "default": "./src/lib.ts"
+    },
+    "./worker": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./lib": {
+      "types": "./src/lib.ts",
+      "default": "./src/lib.ts"
+    }
   },
   "license": "MIT",
   "author": "Alan Wizemann",
