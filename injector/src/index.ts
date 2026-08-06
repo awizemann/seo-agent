@@ -13,7 +13,8 @@
  *
  * Resource overrides: the agent also writes `resource:<pathname>` → JSON
  * `{ "contentType", "body" }` for a small, fixed set of well-known paths
- * (RESOURCE_PATHS — /llms.txt, /llms-full.txt and /robots.txt). A GET/HEAD to
+ * (RESOURCE_PATHS — /llms.txt, /llms-full.txt, /robots.txt and /sitemap.xml).
+ * A GET/HEAD to
  * one of those paths checks for a resource override BEFORE contacting the
  * origin; if found, it's served directly (never proxied). No override →
  * normal proxying, so an origin that serves its own llms.txt is never
@@ -42,7 +43,12 @@ type Override = { title?: string; description?: string };
 // lookup only ever happens for these, so ordinary traffic pays no extra
 // KV/fetch cost. (Markdown twins are looked up too, but only after the
 // markdown lane triggered or a `.md` URL 404'd at the origin.)
-const RESOURCE_PATHS = ['/llms.txt', '/llms-full.txt', '/robots.txt'];
+// /sitemap.xml is here on the SAME terms as the rest: a key exists only when a
+// human approved a generated sitemap, and the agent only ever offers to
+// generate one for a site whose own sitemap could not serve. So "origin wins"
+// is decided upstream, at proposal time, and this list stays a presence check —
+// no key, no override, the origin's own sitemap is proxied untouched.
+const RESOURCE_PATHS = ['/llms.txt', '/llms-full.txt', '/robots.txt', '/sitemap.xml'];
 
 type ResourceOverride = { contentType: string; body: string };
 

@@ -78,7 +78,9 @@ describe('injector resource overrides (llms.txt / llms-full.txt)', () => {
   it('never performs a resource lookup for a non-allowlisted path', async () => {
     const kv = fakeKv({ 'resource:/llms.txt': JSON.stringify({ contentType: 'text/plain', body: 'x' }) });
     const env = { ...baseEnv, SEO_OVERRIDES: kv } as unknown as Env;
-    const req = new Request('https://example.com/sitemap.xml');
+    // Was /sitemap.xml until v1.19.0, which made that path a real resource —
+    // an ordinary page is the honest stand-in for "not in the allowlist".
+    const req = new Request('https://example.com/some/page');
     await worker.fetch(req, env, fakeCtx());
 
     expect(kv.get).not.toHaveBeenCalled();
@@ -95,6 +97,32 @@ describe('injector resource overrides (llms.txt / llms-full.txt)', () => {
     expect(res.headers.get('content-type')).toBe('text/plain; charset=utf-8');
     expect(await res.text()).toBe(body);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // /sitemap.xml joins the allowlist in v1.19.0. The origin-wins guarantee for
+  // it lives UPSTREAM (the agent only ever offers to generate one for a site
+  // whose own sitemap could not serve), so here it behaves exactly like the
+  // other resources: a published key wins, and no key means the origin's own
+  // sitemap is proxied untouched.
+  it('serves a published sitemap.xml override with its XML content type', async () => {
+    const body = '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n</urlset>\n';
+    const kv = fakeKv({ 'resource:/sitemap.xml': JSON.stringify({ contentType: 'application/xml; charset=utf-8', body }) });
+    const env = { ...baseEnv, SEO_OVERRIDES: kv } as unknown as Env;
+    const res = await worker.fetch(new Request('https://example.com/sitemap.xml'), env, fakeCtx());
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('application/xml; charset=utf-8');
+    expect(await res.text()).toBe(body);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // THE ORIGIN-WINS REGRESSION TEST. A site that serves its own sitemap has no
+  // published key, and must keep serving its own bytes.
+  it('proxies sitemap.xml to the origin when nothing is published', async () => {
+    const kv = fakeKv({});
+    const env = { ...baseEnv, SEO_OVERRIDES: kv } as unknown as Env;
+    const res = await worker.fetch(new Request('https://example.com/sitemap.xml'), env, fakeCtx());
+    expect(await res.text()).toBe('origin body');
+    expect(fetchMock).toHaveBeenCalled();
   });
 
   it('proxies robots.txt to the origin when no override is published', async () => {

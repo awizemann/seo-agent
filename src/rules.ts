@@ -19,10 +19,13 @@ export type Triggered = { path: string; rule: string; severity: string; detail: 
  * findings lifecycle as everything else (it auto-resolves the first run a
  * sitemap parses).
  *
- * Informational only for now: there is no field to draft, so `sitemap_missing`
- * is deliberately absent from propose.ts's rule sets and `fieldForRule` returns
- * null for it — a host computing `draftable` from that gets false with no
- * special case. When sitemap generation ships, this becomes its trigger.
+ * Not DRAFTABLE — there is no copy to write — so `sitemap_missing` stays absent
+ * from propose.ts's rule sets and `fieldForRule` returns null for it; a host
+ * computing `draftable` from that gets false with no special case. It IS the
+ * trigger for sitemap GENERATION (sitemap.ts): an open finding here is exactly
+ * the condition under which a managed /sitemap.xml may be proposed, which is
+ * how "origin wins" is enforced — the day a real sitemap parses, this finding
+ * resolves and the offer goes away with it.
  */
 export function discoveryFindings(discovery: Discovery): Triggered[] {
   if (discovery.mode !== 'homepage_crawl') return [];
@@ -35,7 +38,10 @@ export function discoveryFindings(discovery: Discovery): Triggered[] {
         `${discovery.reason}. A sitemap is the list of pages you want search engines to read, ` +
         `with when each last changed — without one they have to guess by following links. ` +
         `We crawled from your homepage instead and found ${discovery.pages} ` +
-        `${discovery.pages === 1 ? 'page' : 'pages'}; any page nothing links to would not be in that count.`,
+        `${discovery.pages === 1 ? 'page' : 'pages'}; any page nothing links to would not be in that count. ` +
+        `We can build a sitemap out of exactly those pages and serve it for you at /sitemap.xml — ` +
+        `you see the file and approve it before anything is served, and the moment your own site starts ` +
+        `serving a sitemap we can read, ours steps aside.`,
     },
   ];
 }

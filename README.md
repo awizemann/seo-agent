@@ -71,7 +71,8 @@ Requirements: a Cloudflare account on the **Workers Paid plan** (the drafting qu
 requires it), wrangler ≥ 4, Node ≥ 18, and a site that serves a `sitemap.xml` — a plain
 `<urlset>`, or a `<sitemapindex>` whose child sitemaps are fetched one level deep. A site
 with no sitemap still audits (the homepage-crawl fallback above), it just gets a
-`sitemap_missing` finding. You also need an
+`sitemap_missing` finding — and can have one *generated* from that crawl and
+served at the edge (see [Managed sitemaps](#managed-sitemaps)). You also need an
 edge injector able to read KV overrides (see [below](#connecting-your-site-the-injector-side)).
 
 ```sh
@@ -360,6 +361,27 @@ nothing). This project gives you the same behavior on any plan:
 - If your policy differs from allow-all, also send a
   [`Content-Signal`](https://contentsignals.org) header that matches your
   robots.txt.
+
+### Managed sitemaps
+
+A site whose own `/sitemap.xml` is missing, empty, or unparseable can have one
+built from the crawl the agent already did, and served at the edge like any
+other resource override:
+
+- `createSitemapProposal()` builds a `<urlset>` from the latest **successful**
+  crawl and parks it as a proposal on the `sitemap_xml` field. A human approves
+  it; approval writes `resource:/sitemap.xml`, which the injector serves.
+- **Origin wins, enforced.** The offer exists only while the `sitemap_missing`
+  finding is open — the crawler's own verdict that discovery had to fall back to
+  a homepage crawl. The first run a real sitemap parses, that finding resolves
+  and the offer disappears with it; the injector never shadows an origin that
+  serves its own sitemap, because no key is ever published for such a site.
+- **Nothing invented.** Every `<loc>` is a page the crawl fetched with a 200 and
+  that isn't noindexed. No `<priority>`, no `<changefreq>` (Google ignores both),
+  and `<lastmod>` **only** where the crawl actually observed one — stamping every
+  URL with the crawl time is how sites get their `lastmod` ignored wholesale.
+- Re-generate after any crawl to refresh it; reverting the change deletes the
+  key and hands the path straight back to your origin.
 
 ### AI traffic telemetry
 

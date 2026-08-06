@@ -144,6 +144,10 @@ export const RESOURCE_FIELDS = new Map<string, AnyResourceSpec>([
   ['llms_txt', { path: '/llms.txt', contentType: 'text/markdown; charset=utf-8' }],
   ['llms_full_txt', { path: '/llms-full.txt', contentType: 'text/markdown; charset=utf-8' }],
   ['robots_txt', { path: '/robots.txt', contentType: 'text/plain; charset=utf-8' }],
+  // Only ever proposed for a site whose OWN sitemap could not serve — the
+  // origin-wins gate lives in sitemap.ts (`sitemapProposalBlockedReason`),
+  // because it is a question about what the crawl found, not about this keyspace.
+  ['sitemap_xml', { path: '/sitemap.xml', contentType: 'application/xml; charset=utf-8' }],
   ['md_twin', { pathFor: mdTwinPath, contentType: 'text/markdown; charset=utf-8' }],
 ]);
 

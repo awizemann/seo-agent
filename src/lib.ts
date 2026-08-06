@@ -77,6 +77,12 @@ export { analyticsSummary, analyticsPage, analyticsImpact } from './analytics.js
 export { buildLlmsTxt, generateLlmsTxt, createLlmsTxtProposal, LLMS_TXT_MAX_ENTRIES } from './llmstxt.js';
 export type { LlmsTxtPage, LlmsTxtConfig } from './llmstxt.js';
 
+// sitemap.xml — build a sitemap from the crawl and propose it, but ONLY for a
+// site whose own sitemap could not serve (origin wins). Approving publishes
+// `resource:/sitemap.xml`, which the site's injector serves.
+export { buildSitemap, generateSitemap, createSitemapProposal, sitemapProposalBlockedReason, SITEMAP_MAX_ENTRIES } from './sitemap.js';
+export type { SitemapPage, SitemapConfig } from './sitemap.js';
+
 // robots.txt — append an explicit AI-crawler policy to the origin's own file
 // (or synthesize one when it has none) and propose it for approval. Approving
 // publishes `resource:/robots.txt`, which REPLACES the origin's response, so
