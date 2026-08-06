@@ -151,7 +151,7 @@ export async function runPipeline(deps: AgentDeps, runId: number) {
       // retention pruning is best-effort
     }
 
-    const rules = await runRules(deps, runId, snapshots, dedupeTriggered(extra));
+    const rules = await runRules(deps, runId, snapshots, dedupeTriggered(extra), discovery);
 
     // Drafting is off the critical path: enqueue one job per candidate and let
     // the queue consumer draft them one at a time. A failure here (or in a

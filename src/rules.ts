@@ -116,8 +116,13 @@ export async function runRules(
   snapshots: PageSnapshot[],
   // Findings from other check modules (e.g. aeo.ts) that share the same
   // (path, rule) open/auto-resolve lifecycle and land in the same upsert.
-  extraTriggered: Triggered[] = []
+  extraTriggered: Triggered[] = [],
+  // How this run's URLs were found. In homepage_crawl mode there IS no sitemap,
+  // so a URL that fails to load cannot be a sitemap problem — it is a broken
+  // internal link, and "remove it from the sitemap" is not a fix anyone can do.
+  discovery?: Discovery
 ): Promise<{ opened: number; resolved: number; open: number }> {
+  const fromLinks = discovery?.mode === 'homepage_crawl';
   const cfg = deps.config;
   const siteOrigin = new URL(cfg.siteUrl).origin;
   const triggered: Triggered[] = [...extraTriggered];
@@ -128,11 +133,22 @@ export async function runRules(
 
   for (const s of snapshots) {
     if (s.status === 0 || s.status >= 400) {
-      add(s.path, 'sitemap_url_error', 'high', s.error ? `fetch error: ${s.error}` : `HTTP ${s.status}`);
+      add(
+        s.path,
+        fromLinks ? 'broken_internal_link' : 'sitemap_url_error',
+        'high',
+        s.error ? `fetch error: ${s.error}` : `HTTP ${s.status}`
+      );
       continue; // head fields are meaningless on errors/redirects
     }
     if (s.status >= 300) {
-      add(s.path, 'sitemap_url_redirects', 'medium', `HTTP ${s.status} — sitemap should list final URLs`);
+      // homepageCrawl follows same-origin redirects instead of snapshotting the
+      // hop (crawl.ts), so a 3xx snapshot here is a sitemap-mode fact; if one
+      // ever slips through in link mode (e.g. a 3xx with no Location) there is
+      // no sitemap to correct, so it raises nothing.
+      if (!fromLinks) {
+        add(s.path, 'sitemap_url_redirects', 'medium', `HTTP ${s.status} — sitemap should list final URLs`);
+      }
       continue;
     }
 
