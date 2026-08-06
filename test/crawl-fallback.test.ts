@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { parseRobotsRules, robotsAllows, normalizeLink, runCrawl, MAX_CRAWL_DEPTH } from '../src/crawl';
+import { BYPASS_HEADER, BYPASS_RESOURCE } from '../src/robotstxt';
 import { discoveryFindings } from '../src/rules';
 
 const ORIGIN = 'https://example.com';
@@ -192,6 +193,34 @@ describe('runCrawl homepage-crawl fallback', () => {
     const { snapshots, discovery } = await runCrawl(fakeDeps(), 1);
     expect(pathsOf(snapshots)).toEqual(['/only']);
     expect(discovery).toEqual({ mode: 'sitemap', reason: null, pages: 1 });
+  });
+
+  // v1.19.1. Since v1.19.0 we can PUBLISH a /sitemap.xml at the edge, which the
+  // injector serves before the origin. Discovery must never read that back: it
+  // would run the crawl off a page list we wrote, resolve `sitemap_missing`
+  // because "a sitemap parses" (ours), and freeze the file it stopped offering
+  // to regenerate. The bypass header keeps the question about the SITE.
+  it('asks the ORIGIN for the sitemap, bypassing any sitemap WE publish', async () => {
+    stubHtmlRewriter();
+    const fetchMock = serve(
+      { '/': '', '/only': '' },
+      { sitemap: new Response('<urlset><url><loc>https://example.com/only</loc></url></urlset>', { status: 200 }) },
+    );
+    await runCrawl(fakeDeps(), 1);
+    const call = fetchMock.mock.calls.find(([i]) => String(i).endsWith('/sitemap.xml'));
+    expect(call).toBeDefined();
+    expect((call![1] as RequestInit & { headers: Record<string, string> }).headers[BYPASS_HEADER]).toBe(BYPASS_RESOURCE);
+  });
+
+  // The page fetches deliberately do NOT bypass: a page must be snapshotted as
+  // a crawler receives it, overrides and all — that is what the rules judge.
+  it('does NOT bypass on the page fetches themselves', async () => {
+    stubHtmlRewriter();
+    const fetchMock = serve({ '/': '' });
+    await runCrawl(fakeDeps(), 1);
+    const pageCall = fetchMock.mock.calls.find(([i]) => String(i) === `${ORIGIN}/`);
+    expect(pageCall).toBeDefined();
+    expect((pageCall![1] as RequestInit & { headers: Record<string, string> }).headers[BYPASS_HEADER]).toBeUndefined();
   });
 
   it('falls back when the sitemap is present but parses to zero URLs', async () => {

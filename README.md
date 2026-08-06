@@ -382,6 +382,10 @@ other resource override:
   URL with the crawl time is how sites get their `lastmod` ignored wholesale.
 - Re-generate after any crawl to refresh it; reverting the change deletes the
   key and hands the path straight back to your origin.
+- **Discovery always asks the origin.** The crawl fetches `/sitemap.xml` with
+  `x-seo-agent-bypass: resource`, so it reads YOUR sitemap, never the one we
+  publish. A managed sitemap therefore can't feed itself, can't resolve its own
+  finding, and can't outlive the day your platform starts emitting one.
 
 ### AI traffic telemetry
 

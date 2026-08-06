@@ -13,9 +13,25 @@
  */
 
 import type { AgentDeps } from './deps.js';
+import { BYPASS_HEADER, BYPASS_RESOURCE } from './robotstxt.js';
 import { VERSION } from './version.js';
 
 const USER_AGENT = `seo-agent/${VERSION} (self-audit; +https://github.com/awizemann/seo-agent)`;
+
+/**
+ * DISCOVERY MUST READ THE ORIGIN'S SITEMAP, NEVER OUR OWN (v1.19.1).
+ *
+ * Since v1.19.0 the agent can publish a generated `/sitemap.xml` as a resource
+ * override, which the injector serves BEFORE the origin. Without this header
+ * the very next crawl would fetch that file back — and three things would go
+ * wrong at once: discovery would run off a page list we wrote (so a page the
+ * site added but nothing links to could never be discovered again), the
+ * `sitemap_missing` finding would resolve because "a sitemap parses" (it is
+ * ours), and the offer to REGENERATE would vanish while the stale file kept
+ * serving. The bypass keeps the question honest: does the SITE serve a usable
+ * sitemap? Origin-wins is decided on the origin's own answer, always.
+ */
+const SITEMAP_FETCH_HEADERS = { 'user-agent': USER_AGENT, [BYPASS_HEADER]: BYPASS_RESOURCE };
 const FETCH_CONCURRENCY = 5;
 const PAGE_TIMEOUT_MS = 15_000;
 // <sitemapindex> fan-out: fetch at most this many same-origin child sitemaps and
@@ -399,7 +415,7 @@ export async function runCrawl(
   let fallbackReason: string | null = null;
   try {
     const sitemapRes = await fetch(`${origin}/sitemap.xml`, {
-      headers: { 'user-agent': USER_AGENT },
+      headers: SITEMAP_FETCH_HEADERS,
       signal: AbortSignal.timeout(PAGE_TIMEOUT_MS),
     });
     if (!sitemapRes.ok) {
@@ -414,7 +430,7 @@ export async function runCrawl(
         const nested = await Promise.all(
           children.map(async (loc) => {
             try {
-              const r = await fetch(loc, { headers: { 'user-agent': USER_AGENT }, signal: AbortSignal.timeout(PAGE_TIMEOUT_MS) });
+              const r = await fetch(loc, { headers: SITEMAP_FETCH_HEADERS, signal: AbortSignal.timeout(PAGE_TIMEOUT_MS) });
               if (!r.ok) return [] as SitemapEntry[];
               return parseSitemap(await r.text(), origin).entries;
             } catch {
