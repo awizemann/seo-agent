@@ -9,9 +9,9 @@
  * — but through the same proposal row, review and apply path as any AI draft.
  */
 
-import { applyOverride, invalidJsonLdReason } from './overrides.js';
+import { applyOverride, invalidJsonLdReason, invalidCanonicalReason } from './overrides.js';
 import { findBannedTerm } from './config.js';
-import { TITLE_CORE_MAX, TITLE_TOTAL_MAX } from './rules.js';
+import { TITLE_CORE_MAX, TITLE_TOTAL_MAX, expectedCanonicalUrl } from './rules.js';
 import type { SiteConfig } from './config.js';
 import type { AgentDeps } from './deps.js';
 
@@ -41,7 +41,15 @@ export const TITLE_RULES = new Set(['long_title', 'missing_title', 'duplicate_ti
  * per-page drafting pipeline that grounds itself in the crawl.
  */
 export const JSONLD_RULES = new Set(['missing_article_jsonld']);
-export const PROPOSABLE_RULES = new Set([...DESCRIPTION_RULES, ...TITLE_RULES, ...JSONLD_RULES]);
+/**
+ * Rules whose fix is the page's canonical URL. Like doubled_title_suffix these
+ * have exactly one correct answer — expectedCanonicalUrl(siteOrigin, path), the
+ * same expression the rule itself checked against — so the drafter is
+ * DETERMINISTIC ONLY: no model call ever happens for this field, and a page
+ * whose computed canonical fails validation is dropped rather than guessed at.
+ */
+export const CANONICAL_RULES = new Set(['missing_canonical', 'canonical_mismatch']);
+export const PROPOSABLE_RULES = new Set([...DESCRIPTION_RULES, ...TITLE_RULES, ...JSONLD_RULES, ...CANONICAL_RULES]);
 
 /**
  * Description rules whose fix is a REWRITE of a description that is already
@@ -65,12 +73,13 @@ export const REWRITE_DESCRIPTION_RULES = new Set(['search_impressions_no_clicks'
 export const sameDescription = (a: string, b: string | null | undefined): boolean =>
   !!b && a.trim().replace(/\s+/g, ' ').toLowerCase() === b.trim().replace(/\s+/g, ' ').toLowerCase();
 
-export type DraftField = 'description' | 'title' | 'jsonld';
+export type DraftField = 'description' | 'title' | 'jsonld' | 'canonical';
 
 /** The override field a rule's fix lands on, or null when the rule isn't proposable. */
 export function fieldForRule(rule: string): DraftField | null {
   if (TITLE_RULES.has(rule)) return 'title';
   if (JSONLD_RULES.has(rule)) return 'jsonld';
+  if (CANONICAL_RULES.has(rule)) return 'canonical';
   if (DESCRIPTION_RULES.has(rule)) return 'description';
   return null;
 }
@@ -86,8 +95,14 @@ export function fieldForRule(rule: string): DraftField | null {
  * rule in this lane — `missing_article_jsonld` fires precisely when the page has
  * no Article node to be the "current" value.
  */
-export function currentValueFor(field: DraftField, snap: { title: string | null; description: string | null }): string | null {
+export function currentValueFor(
+  field: DraftField,
+  snap: { title: string | null; description: string | null; canonical?: string | null }
+): string | null {
   if (field === 'jsonld') return null;
+  // Null for missing_canonical (there is nothing delivered), the delivered URL
+  // for canonical_mismatch — which is exactly what the reviewer should compare.
+  if (field === 'canonical') return snap.canonical ?? null;
   return field === 'title' ? snap.title : snap.description;
 }
 
@@ -103,6 +118,7 @@ export const sqlRuleList = (rules: Set<string>): string => [...rules].map((r) =>
 export const RULE_FIELD_SQL =
   `CASE WHEN f.rule IN (${sqlRuleList(TITLE_RULES)}) THEN 'title'` +
   ` WHEN f.rule IN (${sqlRuleList(JSONLD_RULES)}) THEN 'jsonld'` +
+  ` WHEN f.rule IN (${sqlRuleList(CANONICAL_RULES)}) THEN 'canonical'` +
   ` ELSE 'description' END`;
 
 const VALUE_MIN = 70;
@@ -589,7 +605,7 @@ export async function enqueueCandidates(
 
   const candidates = (
     await deps.db.prepare(
-      `SELECT f.id AS finding_id, f.path, f.rule, f.detail, s.title, s.description
+      `SELECT f.id AS finding_id, f.path, f.rule, f.detail, s.title, s.description, s.canonical
        FROM findings f
        JOIN page_snapshots s ON s.run_id = ?1 AND s.path = f.path
        WHERE f.status = 'open'
@@ -602,7 +618,7 @@ export async function enqueueCandidates(
        LIMIT ?2`
     )
       .bind(runId, max)
-      .all<{ finding_id: number; path: string; rule: string; detail: string | null; title: string | null; description: string | null }>()
+      .all<{ finding_id: number; path: string; rule: string; detail: string | null; title: string | null; description: string | null; canonical: string | null }>()
   ).results;
 
   const jobs = candidates.flatMap((c) => {
@@ -664,16 +680,25 @@ export async function draftAndCreate(
   const deterministic = job.rule === 'doubled_title_suffix' ? dedupeTitleSuffix(job.current, cfg.titleBrandSuffix) : null;
   const dedupedOk = deterministic && !invalidTitleReason(deterministic, cfg, job.current) ? deterministic : null;
 
-  const value =
-    dedupedOk ??
-    (await draft(deps, {
-      path: job.path,
-      title: job.title,
-      current: job.current,
-      rule: job.rule,
-      detail: job.detail,
-      description: job.description,
-    }));
+  // The canonical field is DETERMINISTIC ONLY (see CANONICAL_RULES): the value
+  // is the same expression the rule checked against, and a computed URL that
+  // fails validation is dropped — never handed to a model to guess at.
+  let value: string | null;
+  if (field === 'canonical') {
+    const computed = expectedCanonicalUrl(new URL(cfg.siteUrl).origin, job.path);
+    value = invalidCanonicalReason(computed) ? null : computed;
+  } else {
+    value =
+      dedupedOk ??
+      (await draft(deps, {
+        path: job.path,
+        title: job.title,
+        current: job.current,
+        rule: job.rule,
+        detail: job.detail,
+        description: job.description,
+      }));
+  }
   // invalid after retries — drop; the open finding re-enqueues next run
   if (!value) return { created: false, field };
 
@@ -682,7 +707,7 @@ export async function draftAndCreate(
     `INSERT INTO proposals (created_at, finding_id, path, field, current_value, proposed_value, rationale, model)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
   )
-    .bind(now, job.findingId, job.path, field, job.current, value, job.rule, dedupedOk ? 'deterministic' : cfg.aiModel)
+    .bind(now, job.findingId, job.path, field, job.current, value, job.rule, dedupedOk || field === 'canonical' ? 'deterministic' : cfg.aiModel)
     .first<{ id: number }>();
 
   const autoFields = new Set(cfg.autoApplyFields);

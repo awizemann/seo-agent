@@ -58,6 +58,27 @@ const DESCRIPTION_MAX = 160;
 // Exported: the drafting pipeline (propose.ts) validates drafted titles against
 // the SAME bounds the rules flag them by, so a draft can never satisfy the
 // drafter and re-open its own finding on the next crawl.
+/**
+ * THE canonical a page is supposed to declare: the site origin plus the page's
+ * own path (the homepage is the bare origin — the rule accepts the trailing
+ * slash too, but this is the form we PUBLISH). Both the rule that raises
+ * missing_canonical/canonical_mismatch and the deterministic drafter that
+ * fixes them (propose.ts) call this one expression, so a fix can never fail
+ * its own verifying recrawl by disagreeing about the expected value.
+ */
+export function expectedCanonicalUrl(siteOrigin: string, path: string): string {
+  // A crawl path is a URL pathname, which may legally carry characters the
+  // canonical validator (and an href attribute) can't: an apostrophe, a quote,
+  // a stray space in sloppy markup. Percent-encoding those characters names the
+  // SAME resource — a decoder gives the path back — in a publishable spelling.
+  // It lives HERE, in the shared expression, so the rule that checks a page's
+  // canonical and the drafter that fixes it can never disagree about the
+  // expected form: whatever this returns is both what the rule accepts and what
+  // the fix publishes.
+  const safePath = path.replace(/[\s"'<>\\]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`);
+  return `${siteOrigin}${safePath === '/' ? '' : safePath}`;
+}
+
 export const TITLE_CORE_MAX = 60;
 export const TITLE_TOTAL_MAX = 80;
 
@@ -195,7 +216,7 @@ export async function runRules(
       add(s.path, 'long_description', 'medium', `${description.length} chars (max ${DESCRIPTION_MAX})`);
     }
 
-    const expectedCanonical = `${siteOrigin}${s.path === '/' ? '' : s.path}`;
+    const expectedCanonical = expectedCanonicalUrl(siteOrigin, s.path);
     // The homepage canonical is equivalent with or without the trailing slash;
     // don't flag that difference (some sites emit "origin/", others "origin").
     const canonicalOk = s.canonical === expectedCanonical || (s.path === '/' && s.canonical === `${siteOrigin}/`);

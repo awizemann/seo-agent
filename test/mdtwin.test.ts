@@ -130,7 +130,7 @@ function fakeDb(t: Tables) {
       if (c) c.reverted_at = b[0];
       return { first: null, all: [], meta: {} };
     }
-    if (/SELECT title, description FROM page_snapshots WHERE path = \?/.test(sql)) {
+    if (/SELECT title, description(?:, canonical)? FROM page_snapshots WHERE path = \?/.test(sql)) {
       return { first: t.snapshots.find((s) => s.path === b[0]) ?? null, all: [], meta: {} };
     }
     throw new Error(`fakeDb: unhandled statement: ${sql}`);

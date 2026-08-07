@@ -6,7 +6,7 @@
  * HTMLRewriter. No changes to the origin are required.
  *
  * Contract (shared with the agent): the agent writes `override:<pathname>` →
- * JSON `{ "title"?, "description"?, "jsonld"? }`; this Worker patches the
+ * JSON `{ "title"?, "description"?, "jsonld"?, "canonical"? }`; this Worker patches the
  * matching tags (title + og:title + twitter:title, description +
  * og:description + twitter:description) and appends a JSON-LD <script> to the
  * <head>, only when an override exists, otherwise it proxies the origin
@@ -43,7 +43,7 @@
  * this Worker's job (see `inject`). The agent stores it already canonicalized
  * and `<`-escaped (src/overrides.ts, `checkJsonLd`).
  */
-type Override = { title?: string; description?: string; jsonld?: string };
+type Override = { title?: string; description?: string; jsonld?: string; canonical?: string };
 
 // Fixed allowlist of well-known resource paths — a BEFORE-origin resource
 // lookup only ever happens for these, so ordinary traffic pays no extra
@@ -246,7 +246,7 @@ async function readOverrideRemote(env: RemoteEnv, pathname: string, ctx: Executi
   }
   if (res.status !== 200) return null;
   const o = (await res.json()) as Override;
-  return o.title || o.description || o.jsonld ? o : null;
+  return o.title || o.description || o.jsonld || o.canonical ? o : null;
 }
 
 async function readOverride(env: Env, pathname: string, ctx: ExecutionContext): Promise<Override | null> {
@@ -256,7 +256,7 @@ async function readOverride(env: Env, pathname: string, ctx: ExecutionContext): 
       const raw = await kv.get(`override:${pathname || '/'}`, { cacheTtl: 300 });
       if (!raw) return null;
       const o = JSON.parse(raw) as Override;
-      return o.title || o.description || o.jsonld ? o : null;
+      return o.title || o.description || o.jsonld || o.canonical ? o : null;
     }
     if ((env as RemoteEnv).OVERRIDES_URL) return await readOverrideRemote(env as RemoteEnv, pathname, ctx);
     return null;
@@ -357,6 +357,39 @@ function inject(res: Response, o: Override): Response {
         el.append(script, { html: true });
       },
     });
+  }
+  // Canonical URL: rewrite the origin's tag when one exists, INSERT one when
+  // none does. The two cases can't share a handler — a selector only fires on
+  // elements that exist — so the link handler records whether it fired and the
+  // head's END-tag handler (which runs after every child of head, so after any
+  // canonical link) inserts only when it didn't. onEndTag is new to this lane;
+  // the jsonld append above stays as it is because unconditional insertion
+  // never needs the flag.
+  //
+  // Serve-time belt, same posture as jsonld: this Worker reads a KV namespace
+  // it does not exclusively own, so a hand-written key must not be able to
+  // break out of the href attribute. The agent stores only values that pass
+  // `invalidCanonicalReason` (http(s) only, no whitespace, quotes, angle
+  // brackets, query, fragment or control characters, bounded length), and a
+  // value that violates that here is skipped, not escaped — at serve time the
+  // safe move is to publish nothing.
+  if (o.canonical && /^https?:\/\//.test(o.canonical) && !/[\s"'<>\\?#\u0000-\u001f\u007f]/.test(o.canonical) && o.canonical.length <= 2048) {
+    const canonical = o.canonical;
+    let sawCanonical = false;
+    rw = rw
+      .on('link[rel="canonical"]', {
+        element(el: { setAttribute(n: string, v: string): void }) {
+          sawCanonical = true;
+          el.setAttribute('href', canonical);
+        },
+      })
+      .on('head', {
+        element(el: { onEndTag(cb: (end: { before(content: string, opts: { html: boolean }): void }) => void): void }) {
+          el.onEndTag((end) => {
+            if (!sawCanonical) end.before(`<link rel="canonical" href="${canonical}">`, { html: true });
+          });
+        },
+      });
   }
   return rw.transform(res);
 }

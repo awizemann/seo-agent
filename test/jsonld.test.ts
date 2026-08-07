@@ -158,7 +158,7 @@ describe('checkJsonLd — </script> smuggling', () => {
 
 describe('jsonld is a first-class override field', () => {
   it('is in OVERRIDE_FIELDS alongside the copy fields', () => {
-    expect([...OVERRIDE_FIELDS].sort()).toEqual(['description', 'jsonld', 'title']);
+    expect([...OVERRIDE_FIELDS].sort()).toEqual(['canonical', 'description', 'jsonld', 'title']);
   });
 
   it('storedOverrideValue canonicalizes it, and throws rather than storing an invalid one', () => {
@@ -235,7 +235,7 @@ describe('applyOverride / revert — the jsonld lifecycle', () => {
 
   it('still refuses a field that is not overridable at all', async () => {
     await expect(
-      applyOverride(deps().deps, { path: '/a', field: 'canonical', value: 'x', oldValue: null, source: 'manual' })
+      applyOverride(deps().deps, { path: '/a', field: 'og_image', value: 'x', oldValue: null, source: 'manual' })
     ).rejects.toThrow(/field not overridable/);
   });
 });
@@ -470,7 +470,7 @@ function fakeDb(t: Tables) {
       if (c) c.reverted_at = b[0];
       return { first: null, all: [], meta: {} };
     }
-    if (/SELECT title, description FROM page_snapshots WHERE path = \?/.test(sql)) {
+    if (/SELECT title, description(?:, canonical)? FROM page_snapshots WHERE path = \?/.test(sql)) {
       return { first: t.snapshots.find((s) => s.path === b[0]) ?? null, all: [], meta: {} };
     }
     throw new Error(`fakeDb: unhandled statement: ${sql}`);

@@ -211,7 +211,7 @@ function fakeDb(t: Tables) {
     if (/FROM page_snapshots WHERE run_id = \?/.test(sql)) {
       return { first: null, all: t.snapshots.filter((s) => s.run_id === b[0]), meta: {} };
     }
-    if (/SELECT title, description FROM page_snapshots WHERE path = \?/.test(sql)) {
+    if (/SELECT title, description(?:, canonical)? FROM page_snapshots WHERE path = \?/.test(sql)) {
       return { first: t.snapshots.find((s) => s.path === b[0]) ?? null, all: [], meta: {} };
     }
     throw new Error(`fakeDb: unhandled statement: ${sql}`);
@@ -294,8 +294,8 @@ describe('createProposal — llms_txt field gate', () => {
   });
 
   it('still rejects an unknown field', async () => {
-    await expect(createProposal(deps().deps, { path: '/a', field: 'canonical', value: BODY }, () => null)).rejects.toThrow(
-      /field must be one of: description, title, jsonld/
+    await expect(createProposal(deps().deps, { path: '/a', field: 'og_image', value: BODY }, () => null)).rejects.toThrow(
+      /field must be one of: description, title, jsonld, canonical/
     );
   });
 });

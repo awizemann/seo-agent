@@ -4,6 +4,7 @@ import {
   TITLE_RULES,
   PROPOSABLE_RULES,
   JSONLD_RULES,
+  CANONICAL_RULES,
   fieldForRule,
   parseTitleDetail,
   dedupeTitleSuffix,
@@ -45,8 +46,8 @@ describe('fieldForRule', () => {
   });
 
   it('PROPOSABLE_RULES is exactly the union, and the halves do not overlap', () => {
-    expect(PROPOSABLE_RULES.size).toBe(DESCRIPTION_RULES.size + TITLE_RULES.size + JSONLD_RULES.size);
-    for (const r of [...DESCRIPTION_RULES, ...TITLE_RULES, ...JSONLD_RULES]) expect(PROPOSABLE_RULES.has(r)).toBe(true);
+    expect(PROPOSABLE_RULES.size).toBe(DESCRIPTION_RULES.size + TITLE_RULES.size + JSONLD_RULES.size + CANONICAL_RULES.size);
+    for (const r of [...DESCRIPTION_RULES, ...TITLE_RULES, ...JSONLD_RULES, ...CANONICAL_RULES]) expect(PROPOSABLE_RULES.has(r)).toBe(true);
   });
 
   it('the candidate query CASE maps the same way the function does', () => {

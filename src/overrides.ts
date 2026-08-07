@@ -1,6 +1,6 @@
 /**
  * KV override plumbing. Overrides live at `override:<path>` as a JSON object
- * of field → value (fields: description, title, jsonld). The site Worker's edge
+ * of field → value (fields: description, title, jsonld, canonical). The site Worker's edge
  * SEO layer merges them over its computed meta on every page request, so an
  * approved change is live within the KV cache TTL — no deploy. Every apply
  * and revert lands in the `changes` journal.
@@ -17,7 +17,54 @@ import type { AgentDeps } from './deps.js';
  * "already live" proposal query in listFindings). A field absent from here can
  * never reach KV: applyOverride refuses it.
  */
-export const OVERRIDE_FIELDS = new Set(['description', 'title', 'jsonld']);
+export const OVERRIDE_FIELDS = new Set(['description', 'title', 'jsonld', 'canonical']);
+
+// ---------------------------------------------------------------------------
+// Canonical URL, the fourth page field.
+//
+// The stored value is the absolute URL the injector serves as
+// `<link rel="canonical" href="...">` — rewriting the origin's tag when one
+// exists, inserting one when none does. Unlike title/description there is no
+// drafting judgment in it: the correct value is computed from the site origin
+// and the page's own path (see expectedCanonicalUrl in rules.ts, the same
+// expression the rule checks against), so the drafter is deterministic and a
+// model call never happens for this field.
+// ---------------------------------------------------------------------------
+
+/** Sanity bound on a canonical URL. Browsers and crawlers handle far longer,
+ *  but a canonical past this length is a bug, not a deep page. */
+export const CANONICAL_MAX_CHARS = 2048;
+
+/**
+ * Why a canonical URL is unpublishable, or null. Fail-closed twin of
+ * `invalidJsonLdReason`: every path that can put this value on a page
+ * (deterministic draft, approval via storedOverrideValue, the injector's own
+ * serve-time belt) asks THIS, so there is one answer to "is this publishable".
+ *
+ * The character rules double as attribute safety: a value with no whitespace,
+ * no quotes and no angle brackets cannot escape the href attribute the
+ * injector writes it into, so the serve-time check needs no HTML escaping.
+ */
+export function invalidCanonicalReason(value: string): string | null {
+  if (!value) return 'empty URL';
+  if (value.length > CANONICAL_MAX_CHARS) return `too long (${value.length} chars, max ${CANONICAL_MAX_CHARS})`;
+  if (/[\s"'<>\\]/.test(value)) return 'must not contain whitespace, quotes, angle brackets or backslashes';
+  // eslint-disable-next-line no-control-regex -- control characters can smuggle
+  // line breaks into anything that logs or serves the value.
+  if (/[\u0000-\u001f\u007f]/.test(value)) return 'must not contain control characters';
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return 'not an absolute URL';
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return 'must be an http(s) URL';
+  // A canonical exists to name THE page — query strings and fragments are
+  // exactly the variation it is supposed to collapse.
+  if (url.search || value.includes('?')) return 'must not carry a query string';
+  if (url.hash || value.includes('#')) return 'must not carry a fragment';
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // JSON-LD (structured data), the third page field.
@@ -191,6 +238,14 @@ export function storedOverrideValue(field: string, value: string, suffix: string
     const check = checkJsonLd(value);
     if (!check.ok) throw new Error(`invalid jsonld: ${check.reason}`);
     return check.value;
+  }
+  if (field === 'canonical') {
+    // Same fail-closed edge as jsonld: applyOverride is the one path into KV,
+    // so an unpublishable canonical can never be served — whatever validated
+    // (or didn't) upstream at draft or proposal time.
+    const reason = invalidCanonicalReason(value);
+    if (reason) throw new Error(`invalid canonical: ${reason}`);
+    return value;
   }
   return field === 'title' ? withTitleSuffix(value, suffix || '') : value;
 }

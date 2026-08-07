@@ -12,7 +12,7 @@ import { findBannedTerm, type SiteConfig } from './config.js';
 import { ingestGsc } from './gsc.js';
 import {
   applyOverride, applyResource, revertChange, isPatternSpec, mdTwinPathReason,
-  invalidJsonLdReason, OVERRIDE_FIELDS, RESOURCE_FIELDS, RESOURCE_MAX_CHARS,
+  invalidCanonicalReason, invalidJsonLdReason, OVERRIDE_FIELDS, RESOURCE_FIELDS, RESOURCE_MAX_CHARS,
 } from './overrides.js';
 import { telemetrySummary, telemetryFindings, pruneTelemetry, rollupTelemetryWeekly, listCrawlerHits as telemetryHits } from './telemetry.js';
 import { runCitationProbes, citationFindings, citationConfig, alreadyCheckedToday } from './citations.js';
@@ -414,9 +414,9 @@ export async function draftFinding(deps: Pick<AgentDeps, 'db' | 'draftQueue'>, i
     .bind(f.path, field)
     .first();
   if (existing) return { ok: true, enqueued: 0, note: `a ${field} proposal for this page is already live` };
-  const snap = await deps.db.prepare('SELECT title, description FROM page_snapshots WHERE path = ? ORDER BY id DESC LIMIT 1')
+  const snap = await deps.db.prepare('SELECT title, description, canonical FROM page_snapshots WHERE path = ? ORDER BY id DESC LIMIT 1')
     .bind(f.path)
-    .first<{ title: string | null; description: string | null }>();
+    .first<{ title: string | null; description: string | null; canonical: string | null }>();
   if (!snap) throw new ApiError('no snapshot for that path — run a crawl first', 404);
   await deps.draftQueue.send({
     findingId: f.id,
@@ -466,6 +466,10 @@ export function approvalBlockedReason(
   config?: Pick<SiteConfig, 'bannedTerms'>
 ): string | null {
   if (!config?.bannedTerms?.length) return null;
+  // A canonical is the site's own computed URL, not copy — a banned term match
+  // against the site's own domain would be a false block. Its real gate is
+  // invalidCanonicalReason, run fail-closed in storedOverrideValue at apply.
+  if (p.field === 'canonical') return null;
   const detail =
     p.field === 'description'
       ? invalidReason(p.proposed_value, config)
@@ -578,6 +582,13 @@ export async function createProposal(
     // definition of publishable structured data (checkJsonLd in overrides.ts).
     const reason = invalidJsonLdReason(args.value);
     if (reason) throw new ApiError(`invalid jsonld: ${reason}`, 400);
+  } else if (field === 'canonical') {
+    // The SAME gate the deterministic drafter and applyOverride use — one
+    // definition of a publishable canonical (invalidCanonicalReason in
+    // overrides.ts). No banned-term check, for the reason approvalBlockedReason
+    // gives: a canonical is the site's own URL, not copy.
+    const reason = invalidCanonicalReason(args.value);
+    if (reason) throw new ApiError(`invalid canonical: ${reason}`, 400);
   } else if (field === 'description') {
     const reason = validateDescription(args.value);
     if (reason) throw new ApiError(`invalid description: ${reason}`, 400);
@@ -600,12 +611,13 @@ export async function createProposal(
   if (resource) {
     currentValue = args.currentValue ?? null;
   } else {
-    const snap = await deps.db.prepare('SELECT title, description FROM page_snapshots WHERE path = ? ORDER BY id DESC LIMIT 1')
+    const snap = await deps.db.prepare('SELECT title, description, canonical FROM page_snapshots WHERE path = ? ORDER BY id DESC LIMIT 1')
       .bind(args.path)
-      .first<{ title: string | null; description: string | null }>();
-    currentValue = currentValueFor(field as 'description' | 'title' | 'jsonld', {
+      .first<{ title: string | null; description: string | null; canonical: string | null }>();
+    currentValue = currentValueFor(field as 'description' | 'title' | 'jsonld' | 'canonical', {
       title: snap?.title ?? null,
       description: snap?.description ?? null,
+      canonical: snap?.canonical ?? null,
     });
   }
   const row = await deps.db.prepare(
