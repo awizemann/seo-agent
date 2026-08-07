@@ -18,6 +18,13 @@
  * config-free — it needs only overrides that exist and a crawl that ran.
  *
  * Deliberate non-goals:
+ *  - The `jsonld` page field is NOT checked. The crawl records `jsonld_types`
+ *    (which @types a page delivered), never the JSON-LD source text, so there is
+ *    no delivered value to compare a stored document against. Presence of the
+ *    expected @type would be a weaker, different claim than the byte equality
+ *    this sense makes about title and description, and reporting it under the
+ *    same critical `injection_regression` rule would overstate it. Out of scope
+ *    until the crawl captures the block itself.
  *  - RESOURCE overrides (`resource:<path>` — /llms.txt, /robots.txt, .md twins)
  *    are NOT checked. The crawl only fetches sitemap pages and parses their
  *    <head>; it never fetches those resource paths, so there is no delivered

@@ -49,8 +49,10 @@ Daily cron (and `POST /run` on demand):
    your injector appends itself, so a draft must never carry it) and "actually
    different from what we serve today". `doubled_title_suffix` needs no model at all:
    dropping the repeated suffix has one right answer, so it is drafted deterministically
-   and reviewed through the same proposal flow. Invalid drafts are dropped and the
-   finding re-enqueues next run. A host that raises its own findings can borrow the
+   and reviewed through the same proposal flow. `missing_article_jsonld` drafts a
+   **structured-data** block rather than copy — see
+   [Structured data (JSON-LD)](#structured-data-json-ld). Invalid drafts are dropped and
+   the finding re-enqueues next run. A host that raises its own findings can borrow the
    pipeline: `search_impressions_no_clicks` — a page ranking on page one that nobody
    clicks — drafts a **description**, because the description is the part of the snippet
    Google does not rank on and rewriting the title of a page-one result risks the
@@ -58,8 +60,8 @@ Daily cron (and `POST /run` on demand):
    length, and a draft that comes back identical to the description already served is
    rejected, since a rewrite that changes nothing fixes nothing.
 4. **Act** — approved proposals become KV overrides (`override:<path>` →
-   `{"description": "...", "title": "..."}`) that the site's injector merges over its
-   computed meta. Live within the injector's KV cache TTL. Nothing auto-applies unless
+   `{"description": "...", "title": "...", "jsonld": "..."}`) that the site's injector
+   merges over its computed meta. Live within the injector's KV cache TTL. Nothing auto-applies unless
    a field is opted into `AUTO_APPLY_FIELDS`.
 5. **Sense (optional)** — Google Search Console ingestion pulls page+query daily
    metrics (impressions, clicks, CTR, position) into D1 for CTR-outlier detection,
@@ -161,18 +163,29 @@ KV namespace** you created above into your site's injector Worker and merge over
 over the meta you already compute, per this contract:
 
 - **Key:** `override:<pathname>` — `override:/` for the home page, `override:/blog/x` etc.
-- **Value:** a JSON object of overridable fields — `description` and/or `title`.
+- **Value:** a JSON object of overridable fields — `description`, `title` and/or `jsonld`.
 - **Read** with a short `cacheTtl`, and **fail open**: any KV miss or error must serve
   your computed meta unchanged, so a problem here can never take the site down.
+
+`jsonld` is the JSON-LD document as **JSON text, with no `<script>` wrapper** — the
+wrapper is the injector's job, so the same stored bytes work whether you inline them,
+serve them from a template, or hand them to HTMLRewriter. The agent stores it already
+validated and canonicalized, with `<` and `>` written as `\u003c` / `\u003e`, so the
+value is inert inside a `<script>` element. Add it to the page's head **additively** —
+a page that already ships JSON-LD keeps its own block and gets this one too, which is
+valid and is what consumers expect.
 
 ```ts
 // In your injector, after computing `meta` for the route:
 const raw = await env.SEO_OVERRIDES.get(`override:${pathname || '/'}`, { cacheTtl: 300 });
 if (raw) {
   try {
-    const o = JSON.parse(raw) as { title?: string; description?: string };
+    const o = JSON.parse(raw) as { title?: string; description?: string; jsonld?: string };
     if (o.title) meta.title = o.title;
     if (o.description) meta.description = o.description;
+    // Belt: the stored value cannot contain `<`, so a value that does was not
+    // written by this agent — publish nothing rather than markup.
+    if (o.jsonld && !o.jsonld.includes('<')) meta.jsonLdBlocks.push(o.jsonld);
   } catch { /* fail open — keep computed meta */ }
 }
 ```
@@ -184,6 +197,63 @@ the site. It proxies every request to your origin and merges the same KV overrid
 into HTML responses with HTMLRewriter, fail-open, no origin changes. Copy
 `injector/wrangler.example.jsonc` → `wrangler.jsonc`, set the route, `ORIGIN_HOST`,
 and the shared `SEO_OVERRIDES` namespace, then `wrangler deploy -c injector/wrangler.jsonc`.
+
+### Structured data (JSON-LD)
+
+`jsonld` is a page override field like `title` and `description`, and rides the same
+lifecycle: a finding, a drafted or hand-written proposal, an approval, a KV write, a
+journal row, a revert. The stored value is the JSON-LD document as **JSON text with no
+`<script>` wrapper**; the injector adds the wrapper when it serves the page.
+
+**What raises it.** One rule, `missing_article_jsonld`: a page under
+`ARTICLE_PATH_PREFIX` that delivers no `Article` node. Breadth is deliberately narrow —
+`Organization`, `FAQPage`, `Product` and friends are claims about the business rather
+than about what is on the page, so they are not something a per-page pipeline grounded
+in a crawl should be inventing.
+
+**What a draft may say.** The drafting prompt is built around refusing to invent. A
+wrong meta description is bad copy; a wrong `datePublished` or a fabricated `author` is
+a machine-readable falsehood republished under your name, which search and answer
+engines treat as fact and no reader ever sees to correct. So the model is given only
+what the crawl observed — the page title, the meta description, and the body excerpt
+when `ARTICLE_API_TEMPLATE` is configured — and is told to **omit** any field it cannot
+read off the page. A minimal `Article` with a correct `headline` is a complete fix.
+
+**Validation** (identical at draft, at manual proposal, and at apply — a draft that
+fails it is dropped, never stored):
+
+- parses as JSON, to an object or a non-empty array of objects;
+- every node carries an `@context` referencing schema.org and a non-empty `@type`;
+- the canonical serialization is at most 8192 characters.
+
+On success the value is **re-serialized** rather than merely accepted: `<` and `>` are
+written as `\u003c` / `\u003e`. Those are ordinary JSON escapes — a parser yields the
+original characters, so the document is unchanged for any consumer — but the stored
+bytes cannot close the enclosing `<script>` element or open an HTML comment. That is
+why the check normalizes instead of rejecting `</`: escaping `<` closes every spelling
+of the trick at once, including a `<` that arrives via a JSON `\u` escape. No HTML
+entities are used anywhere — `&lt;` inside JSON-LD is data, and an entity would change
+the value.
+
+**Injection is additive.** A page that already has JSON-LD keeps its own block and gets
+this one as well. Multiple `ld+json` blocks are valid and consumers union them; deciding
+that one of two `Article` nodes should win is a merge policy, and there is no honest way
+to pick one without parsing the origin's block. Adding is the behaviour that cannot
+silently delete a publisher's own markup.
+
+**Not verified.** The `injection_regression` sense proves title and description are
+being served by comparing KV against the crawl. It does not check `jsonld`: the crawl
+records which `@type`s a page delivered, never the JSON-LD source, so there is nothing
+to compare byte-for-byte and a weaker presence check would overstate what it knows.
+
+Hand-write one through the same gate:
+
+```bash
+curl -X POST "$AGENT/proposals" -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"path":"/articles/caching","field":"jsonld",
+       "value":"{\"@context\":\"https://schema.org\",\"@type\":\"Article\",\"headline\":\"How caching works\"}"}'
+```
 
 ## Google Search Console sensing (optional but recommended)
 

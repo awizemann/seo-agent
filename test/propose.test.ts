@@ -334,9 +334,10 @@ describe('lib entry point exposes the drafting dedupe key', () => {
 
   it('answers the field for every proposable rule, and null otherwise', async () => {
     const { fieldForRule } = await import('../src/lib');
-    const { PROPOSABLE_RULES, TITLE_RULES } = await import('../src/propose');
+    const { PROPOSABLE_RULES, TITLE_RULES, JSONLD_RULES } = await import('../src/propose');
     for (const rule of PROPOSABLE_RULES) {
-      expect(fieldForRule(rule)).toBe(TITLE_RULES.has(rule) ? 'title' : 'description');
+      const expected = TITLE_RULES.has(rule) ? 'title' : JSONLD_RULES.has(rule) ? 'jsonld' : 'description';
+      expect(fieldForRule(rule)).toBe(expected);
     }
     expect(fieldForRule('llms_txt_missing')).toBeNull();
   });

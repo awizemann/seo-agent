@@ -107,6 +107,15 @@ export type { ResourceSpec, PatternResourceSpec, AnyResourceSpec } from './overr
 // The title suffix contract: what a stored override value actually is. A host
 // that writes overrides outside applyOverride must apply the same rule.
 export { withTitleSuffix, storedOverrideValue } from './overrides.js';
+// Page override fields. OVERRIDE_FIELDS is the enumeration — a host rendering a
+// field picker or validating one reads it rather than listing fields itself.
+// The JSON-LD gate is public for the same reason `findBannedTerm` is: a host
+// (or a byte-parity edge port) must be able to answer "is this publishable, and
+// what exactly gets stored" with THIS function, not a reimplementation — the
+// `<`-escaping in its canonical output is what makes the stored value safe
+// inside a <script> element.
+export { OVERRIDE_FIELDS, checkJsonLd, invalidJsonLdReason, JSONLD_MAX_CHARS } from './overrides.js';
+export type { JsonLdCheck } from './overrides.js';
 
 // Drafting — the queue consumer half, and the validator the drafts must pass.
 export { draftAndCreate, invalidReason, type DraftAndCreateResult } from './propose.js';
@@ -121,6 +130,10 @@ export type { DraftJob, DraftTrace } from './propose.js';
 // one that happens. The FUNCTION is exported rather than the rule sets on
 // purpose: one answer, and no second copy of the mapping to keep in step.
 export { fieldForRule } from './propose.js';
+// The other half of building a DraftJob by hand: which snapshot value is the
+// `current` for a field. Exported beside fieldForRule and for the same reason —
+// it is not always the obvious one (`jsonld` is always null; see the function).
+export { currentValueFor } from './propose.js';
 export type { DraftField } from './propose.js';
 
 // ---------------------------------------------------------------------------

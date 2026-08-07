@@ -7,10 +7,13 @@
 import { runCrawl, prunePageSnapshots } from './crawl.js';
 import { runRules, discoveryFindings, validateTitle, type Triggered } from './rules.js';
 import { aeoChecks } from './aeo.js';
-import { enqueueCandidates, draftWithTrace, invalidReason, fieldForRule } from './propose.js';
+import { enqueueCandidates, draftWithTrace, invalidReason, fieldForRule, currentValueFor } from './propose.js';
 import { findBannedTerm, type SiteConfig } from './config.js';
 import { ingestGsc } from './gsc.js';
-import { applyOverride, applyResource, revertChange, isPatternSpec, mdTwinPathReason, RESOURCE_FIELDS, RESOURCE_MAX_CHARS } from './overrides.js';
+import {
+  applyOverride, applyResource, revertChange, isPatternSpec, mdTwinPathReason,
+  invalidJsonLdReason, OVERRIDE_FIELDS, RESOURCE_FIELDS, RESOURCE_MAX_CHARS,
+} from './overrides.js';
 import { telemetrySummary, telemetryFindings, pruneTelemetry, rollupTelemetryWeekly, listCrawlerHits as telemetryHits } from './telemetry.js';
 import { runCitationProbes, citationFindings, citationConfig, alreadyCheckedToday } from './citations.js';
 import { impactFindings } from './impact.js';
@@ -316,7 +319,11 @@ export async function listFindings(deps: Pick<AgentDeps, 'db'>, status = 'open')
   if (status === 'open') {
     const live = (
       await deps.db.prepare(
-        "SELECT DISTINCT path, field FROM proposals WHERE field IN ('description', 'title') AND status IN ('proposed', 'approved')"
+        // The field list is built from OVERRIDE_FIELDS, not written out here, so
+        // a new page field is covered by this gate the day it is added — a
+        // literal list would have silently kept `jsonld` findings draftable
+        // while a jsonld proposal was already live.
+        `SELECT DISTINCT path, field FROM proposals WHERE field IN (${[...OVERRIDE_FIELDS].map((f) => `'${f}'`).join(', ')}) AND status IN ('proposed', 'approved')`
       ).all<{ path: string; field: string }>()
     ).results;
     for (const r of live) liveKeys.add(liveKey(r.path, r.field));
@@ -419,7 +426,7 @@ export async function draftFinding(deps: Pick<AgentDeps, 'db' | 'draftQueue'>, i
     detail: f.detail,
     title: snap.title,
     description: snap.description,
-    current: field === 'title' ? snap.title : snap.description,
+    current: currentValueFor(field, snap),
   });
   console.log(JSON.stringify({ evt: 'finding_draft_enqueued', id, path: f.path }));
   return { ok: true, enqueued: 1, note: 'draft queued — the proposal appears within ~1–2 min' };
@@ -527,8 +534,11 @@ export async function createProposal(
   const field = args.field || 'description';
   if (!args.path || !args.value) throw new ApiError('path and value required', 400);
   const resource = RESOURCE_FIELDS.get(field);
-  if (field !== 'description' && field !== 'title' && !resource) {
-    throw new ApiError(`field must be description, title, or one of: ${[...RESOURCE_FIELDS.keys()].join(', ')}`, 400);
+  // Both enumerations, never a hand-written list — a page field added to
+  // OVERRIDE_FIELDS is proposable here without a second edit, and one removed
+  // stops being proposable for the same reason.
+  if (!OVERRIDE_FIELDS.has(field) && !resource) {
+    throw new ApiError(`field must be one of: ${[...OVERRIDE_FIELDS, ...RESOURCE_FIELDS.keys()].join(', ')}`, 400);
   }
   if (resource) {
     // A resource body is a whole file, not a meta string: the only checks that
@@ -562,6 +572,12 @@ export async function createProposal(
           .bind(field)
           .first<{ id: number }>();
     if (open) throw new ApiError(`a proposal for this file is already awaiting review (#${open.id})`, 409);
+  } else if (field === 'jsonld') {
+    // The SAME gate the AI lane and applyOverride use — a hand-written block
+    // gets no easier a ride than a drafted one, and there is exactly one
+    // definition of publishable structured data (checkJsonLd in overrides.ts).
+    const reason = invalidJsonLdReason(args.value);
+    if (reason) throw new ApiError(`invalid jsonld: ${reason}`, 400);
   } else if (field === 'description') {
     const reason = validateDescription(args.value);
     if (reason) throw new ApiError(`invalid description: ${reason}`, 400);
@@ -587,7 +603,10 @@ export async function createProposal(
     const snap = await deps.db.prepare('SELECT title, description FROM page_snapshots WHERE path = ? ORDER BY id DESC LIMIT 1')
       .bind(args.path)
       .first<{ title: string | null; description: string | null }>();
-    currentValue = (field === 'description' ? snap?.description : snap?.title) ?? null;
+    currentValue = currentValueFor(field as 'description' | 'title' | 'jsonld', {
+      title: snap?.title ?? null,
+      description: snap?.description ?? null,
+    });
   }
   const row = await deps.db.prepare(
     `INSERT INTO proposals (created_at, path, field, current_value, proposed_value, rationale, model)

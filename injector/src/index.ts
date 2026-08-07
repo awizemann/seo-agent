@@ -6,10 +6,11 @@
  * HTMLRewriter. No changes to the origin are required.
  *
  * Contract (shared with the agent): the agent writes `override:<pathname>` →
- * JSON `{ "title"?, "description"? }`; this Worker patches the matching tags
- * (title + og:title + twitter:title, description + og:description +
- * twitter:description) only when an override exists, otherwise it proxies the
- * origin byte-for-byte.
+ * JSON `{ "title"?, "description"?, "jsonld"? }`; this Worker patches the
+ * matching tags (title + og:title + twitter:title, description +
+ * og:description + twitter:description) and appends a JSON-LD <script> to the
+ * <head>, only when an override exists, otherwise it proxies the origin
+ * byte-for-byte.
  *
  * Resource overrides: the agent also writes `resource:<pathname>` → JSON
  * `{ "contentType", "body" }` for a small, fixed set of well-known paths
@@ -37,7 +38,12 @@
  *   routes         — the hostname to front, e.g. "eo.example.com/*"
  */
 
-type Override = { title?: string; description?: string };
+/**
+ * `jsonld` is the JSON-LD document as JSON TEXT — no <script> wrapper, that is
+ * this Worker's job (see `inject`). The agent stores it already canonicalized
+ * and `<`-escaped (src/overrides.ts, `checkJsonLd`).
+ */
+type Override = { title?: string; description?: string; jsonld?: string };
 
 // Fixed allowlist of well-known resource paths — a BEFORE-origin resource
 // lookup only ever happens for these, so ordinary traffic pays no extra
@@ -240,7 +246,7 @@ async function readOverrideRemote(env: RemoteEnv, pathname: string, ctx: Executi
   }
   if (res.status !== 200) return null;
   const o = (await res.json()) as Override;
-  return o.title || o.description ? o : null;
+  return o.title || o.description || o.jsonld ? o : null;
 }
 
 async function readOverride(env: Env, pathname: string, ctx: ExecutionContext): Promise<Override | null> {
@@ -250,7 +256,7 @@ async function readOverride(env: Env, pathname: string, ctx: ExecutionContext): 
       const raw = await kv.get(`override:${pathname || '/'}`, { cacheTtl: 300 });
       if (!raw) return null;
       const o = JSON.parse(raw) as Override;
-      return o.title || o.description ? o : null;
+      return o.title || o.description || o.jsonld ? o : null;
     }
     if ((env as RemoteEnv).OVERRIDES_URL) return await readOverrideRemote(env as RemoteEnv, pathname, ctx);
     return null;
@@ -319,6 +325,38 @@ function inject(res: Response, o: Override): Response {
       .on('meta[name="description"]', setContent(o.description))
       .on('meta[property="og:description"]', setContent(o.description))
       .on('meta[name="twitter:description"]', setContent(o.description));
+  }
+  // Structured data. Unlike the fields above there is no origin tag to patch,
+  // so this is the one lane that ADDS an element rather than rewriting one.
+  //
+  // PLACEMENT — `el.append(..., { html: true })` on the `head` element inserts
+  // the script as head's LAST child, i.e. immediately before `</head>`. That is
+  // the same "operate on the element the selector matched" idiom the title and
+  // meta lanes use, so all four fields stay one HTMLRewriter pass over the head
+  // with no second selector and no end-tag handler to keep in sync. Appending
+  // (rather than prepending) also means we never sit between the origin's
+  // <meta charset> and the top of the document.
+  //
+  // ADDITIVE, NEVER DEDUPED (v1): a page that already ships JSON-LD gets ours
+  // as well. Multiple ld+json blocks are valid and consumers union them, so the
+  // additive result is correct; deciding that one of two Article nodes should
+  // win is a merge policy, and there is no honest way to pick without parsing
+  // the origin's block and reasoning about which fields it got right. Until
+  // that exists, adding is the behaviour that cannot silently delete a
+  // publisher's own markup.
+  //
+  // The value is stored `<`-escaped (checkJsonLd), so it cannot close this
+  // element. The re-test here is the edge's own belt: this Worker reads a KV
+  // namespace it does not exclusively own, and a hand-written key must not be
+  // able to inject markup into a fronted site. A value carrying `<` is skipped,
+  // not sanitized — at serve time the safe move is to publish nothing.
+  if (o.jsonld && !o.jsonld.includes('<')) {
+    const script = `<script type="application/ld+json">${o.jsonld}</script>`;
+    rw = rw.on('head', {
+      element(el: { append(content: string, opts: { html: boolean }): void }) {
+        el.append(script, { html: true });
+      },
+    });
   }
   return rw.transform(res);
 }

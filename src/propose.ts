@@ -9,7 +9,7 @@
  * — but through the same proposal row, review and apply path as any AI draft.
  */
 
-import { applyOverride } from './overrides.js';
+import { applyOverride, invalidJsonLdReason } from './overrides.js';
 import { findBannedTerm } from './config.js';
 import { TITLE_CORE_MAX, TITLE_TOTAL_MAX } from './rules.js';
 import type { SiteConfig } from './config.js';
@@ -32,7 +32,16 @@ export const DESCRIPTION_RULES = new Set([
   'search_impressions_no_clicks',
 ]);
 export const TITLE_RULES = new Set(['long_title', 'missing_title', 'duplicate_title', 'doubled_title_suffix']);
-export const PROPOSABLE_RULES = new Set([...DESCRIPTION_RULES, ...TITLE_RULES]);
+/**
+ * Rules whose fix is a STRUCTURED DATA block rather than a line of copy. One
+ * rule in v1: `missing_article_jsonld`, raised by rules.ts for a page under
+ * ARTICLE_PATH_PREFIX that delivers no Article node. The breadth is deliberate
+ * — Organization/FAQ/Product markup is a different question (what is TRUE about
+ * the business, not what is visible on the page) and does not belong to a
+ * per-page drafting pipeline that grounds itself in the crawl.
+ */
+export const JSONLD_RULES = new Set(['missing_article_jsonld']);
+export const PROPOSABLE_RULES = new Set([...DESCRIPTION_RULES, ...TITLE_RULES, ...JSONLD_RULES]);
 
 /**
  * Description rules whose fix is a REWRITE of a description that is already
@@ -56,13 +65,30 @@ export const REWRITE_DESCRIPTION_RULES = new Set(['search_impressions_no_clicks'
 export const sameDescription = (a: string, b: string | null | undefined): boolean =>
   !!b && a.trim().replace(/\s+/g, ' ').toLowerCase() === b.trim().replace(/\s+/g, ' ').toLowerCase();
 
-export type DraftField = 'description' | 'title';
+export type DraftField = 'description' | 'title' | 'jsonld';
 
 /** The override field a rule's fix lands on, or null when the rule isn't proposable. */
 export function fieldForRule(rule: string): DraftField | null {
   if (TITLE_RULES.has(rule)) return 'title';
+  if (JSONLD_RULES.has(rule)) return 'jsonld';
   if (DESCRIPTION_RULES.has(rule)) return 'description';
   return null;
+}
+
+/**
+ * The CURRENT value of a field for a page, read off its crawl snapshot — the
+ * `current` a drafting job carries and the `current_value` a proposal row keeps.
+ *
+ * `jsonld` is always null, and that is a statement about the snapshot rather
+ * than a gap: the crawl records `jsonld_types` (which @types a page delivered),
+ * never the JSON-LD source text, so there is no prior document to show a
+ * reviewer or hand back to the drafter. It also does not matter for the one
+ * rule in this lane — `missing_article_jsonld` fires precisely when the page has
+ * no Article node to be the "current" value.
+ */
+export function currentValueFor(field: DraftField, snap: { title: string | null; description: string | null }): string | null {
+  if (field === 'jsonld') return null;
+  return field === 'title' ? snap.title : snap.description;
 }
 
 /** SQL literal list for a rule set — module constants only, never caller input. */
@@ -74,7 +100,10 @@ export const sqlRuleList = (rules: Set<string>): string => [...rules].map((r) =>
  * rather than description-only — a live title proposal must not suppress a
  * description draft on the same page, or vice versa.
  */
-export const RULE_FIELD_SQL = `CASE WHEN f.rule IN (${sqlRuleList(TITLE_RULES)}) THEN 'title' ELSE 'description' END`;
+export const RULE_FIELD_SQL =
+  `CASE WHEN f.rule IN (${sqlRuleList(TITLE_RULES)}) THEN 'title'` +
+  ` WHEN f.rule IN (${sqlRuleList(JSONLD_RULES)}) THEN 'jsonld'` +
+  ` ELSE 'description' END`;
 
 const VALUE_MIN = 70;
 const VALUE_MAX = 160;
@@ -170,6 +199,43 @@ const titleSystemPrompt = (cfg: SiteConfig): string => {
 
 /** Exported for tests: the exact title system prompt a config produces. */
 export const buildTitleSystemPrompt = titleSystemPrompt;
+
+/**
+ * The JSON-LD system prompt. The whole design of this one is REFUSAL TO
+ * INVENT, because structured data is the one field where a plausible guess is
+ * actively harmful: a fabricated `author` or `datePublished` is a machine-
+ * readable claim about the world, republished under the site's name, that
+ * search and answer engines treat as fact and that no reader will ever see to
+ * correct. A wrong meta description is bad copy; a wrong `datePublished` is
+ * misinformation with a schema around it.
+ *
+ * So the grounding is narrower than any other lane: the model may use ONLY
+ * what the crawl actually observed on the page (title, meta description, and
+ * the body excerpt when ARTICLE_API_TEMPLATE is configured), and every field
+ * it cannot source from that must be OMITTED. Omission is explicitly the right
+ * answer here — a minimal Article node with a correct headline is a complete,
+ * valid fix for `missing_article_jsonld`, and the validator does not ask for
+ * more (checkJsonLd requires only @context and @type).
+ *
+ * No house style and no brand suffix: this is data, not prose, so the
+ * operator's voice guidance would only tempt the model to editorialize inside
+ * a field. `bannedTerms` still applies at approval time (approvalBlockedReason
+ * runs the term match on every non-description field, this one included).
+ */
+const jsonldSystemPrompt = (cfg: SiteConfig): string =>
+  [
+    `You write schema.org JSON-LD structured data for pages on ${cfg.siteName} (${cfg.siteUrl}).`,
+    'Output ONLY a single JSON object. No markdown, no code fences, no commentary, no <script> tag.',
+    'It must have "@context": "https://schema.org" and an "@type".',
+    'Ground EVERY field in what the page itself shows you below. You may not infer, guess, or supply a typical value.',
+    'OMIT any field you cannot read off the page. A short object with three correct fields is right; '
+      + 'a complete-looking one with an invented field is wrong.',
+    'Never invent an author, a publisher, an organization, a date, an image, a rating, or a price. '
+      + 'If the page does not state it, it does not go in.',
+  ].join('\n');
+
+/** Exported for tests: the exact JSON-LD system prompt a config produces. */
+export const buildJsonLdSystemPrompt = jsonldSystemPrompt;
 
 // What each title rule asks the drafter to change. The rule is the whole brief —
 // the same string a description draft carries as its rationale.
@@ -372,6 +438,47 @@ const titleUserPrompt = (input: DraftInput, context: string): string => {
   ].join('\n');
 };
 
+/**
+ * The JSON-LD brief. It names the three sources the model is allowed to draw
+ * on and maps each to the field it may become, so "ground it in the page" is an
+ * instruction with referents rather than a slogan. `datePublished` is called out
+ * by name because it is the field a model most wants to hallucinate — a crawl
+ * snapshot carries no publication date, so unless one is visible in the body
+ * excerpt there is nothing to write and the answer is to leave it out.
+ */
+const jsonldUserPrompt = (input: DraftInput, context: string): string =>
+  [
+    `Page URL path: ${input.path}`,
+    `Page title, as delivered: ${input.title ?? '(none)'}`,
+    `Page meta description, as delivered: ${input.description ?? '(none)'}`,
+    ...(context ? [`Visible page content:\n${context}`] : []),
+    '',
+    'This is an article page that carries no Article structured data. Write an Article object for it.',
+    'Use the page title for "headline". Use the meta description for "description" if there is one.',
+    'Include "datePublished" ONLY if a publication date appears in the page content above — otherwise omit it entirely.',
+    'Omit "author", "publisher" and "image" unless the page content above states them.',
+    'Return only the JSON object.',
+  ].join('\n');
+
+/**
+ * Sanitize a JSON-LD draft. Separate from `sanitize` because that one is built
+ * for a line of prose and would corrupt JSON on two counts: it collapses every
+ * whitespace RUN to a single space (rewriting the contents of string values)
+ * and it strips leading/trailing quotes (which for a JSON string value are
+ * structure). Here the only cleanup that is safe is removing the wrappers a
+ * chat model puts AROUND the document — a reasoning block, a ```json fence —
+ * and trimming. Anything left is handed to JSON.parse, which is a far better
+ * judge of the rest than a regex.
+ */
+export function sanitizeJsonLd(raw: string): string {
+  return raw
+    .replace(/<think>[\s\S]*?<\/think>/g, '')
+    .trim()
+    .replace(/^```(?:json|ld\+json)?\s*/i, '')
+    .replace(/\s*```$/, '')
+    .trim();
+}
+
 /** Draft + validate with full intermediates — powers both the pipeline and the /proposals/dry-run diagnostics endpoint. */
 export async function draftWithTrace(
   deps: Pick<AgentDeps, 'ai' | 'config'>,
@@ -390,15 +497,25 @@ export async function draftWithTrace(
   // spending the check on them would only add a way for a legitimate draft to
   // be refused.
   const wantsRewrite = !!input.rule && REWRITE_DESCRIPTION_RULES.has(input.rule);
+  // A jsonld draft is validated by EXACTLY the function that gates apply
+  // (checkJsonLd, via invalidJsonLdReason in overrides.ts) — one definition of
+  // publishable, so a draft can never satisfy the drafter and then be refused
+  // at the KV boundary. A draft that still fails after the retry turn returns
+  // null and is dropped by `draft` below: withdrawn, never stored, exactly as
+  // an over-length title or a banned-term description is.
   const validate = (text: string): string | null => {
+    if (field === 'jsonld') return invalidJsonLdReason(text);
     if (field === 'title') return invalidTitleReason(text, cfg, input.current);
     if (wantsRewrite && sameDescription(text, input.current)) return 'unchanged from the current description';
     return invalidReason(text, cfg);
   };
+  const promptFor = <T,>(jsonld: T, title: T, description: T): T =>
+    field === 'jsonld' ? jsonld : field === 'title' ? title : description;
   const messages = [
-    { role: 'system', content: field === 'title' ? titleSystemPrompt(cfg) : systemPrompt(cfg) },
-    { role: 'user', content: field === 'title' ? titleUserPrompt(input, context) : descriptionUserPrompt(input, context) },
+    { role: 'system', content: promptFor(jsonldSystemPrompt, titleSystemPrompt, systemPrompt)(cfg) },
+    { role: 'user', content: promptFor(jsonldUserPrompt, titleUserPrompt, descriptionUserPrompt)(input, context) },
   ];
+  const noun = promptFor('JSON-LD object', 'title', 'meta description');
   const trace: DraftTrace[] = [];
 
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -414,7 +531,8 @@ export async function draftWithTrace(
       continue;
     }
     const raw = extractText(out);
-    const text = sanitize(raw);
+    // JSON must not go through the prose sanitizer — see sanitizeJsonLd.
+    const text = field === 'jsonld' ? sanitizeJsonLd(raw) : sanitize(raw);
     // Inside the loop, so the RETRY's output is term-checked exactly as hard as
     // the first draft — a model that swaps one banned term for another still
     // fails, and the draft is dropped rather than published.
@@ -424,7 +542,7 @@ export async function draftWithTrace(
     messages.push({ role: 'assistant', content: raw });
     messages.push({
       role: 'user',
-      content: `That was invalid: ${reason}. Return only the corrected ${field === 'title' ? 'title' : 'meta description'}.`,
+      content: `That was invalid: ${reason}. Return only the corrected ${noun}.`,
     });
   }
   return { value: null, trace };
@@ -498,7 +616,7 @@ export async function enqueueCandidates(
       detail: c.detail,
       title: c.title,
       description: c.description,
-      current: field === 'title' ? c.title : c.description,
+      current: currentValueFor(field, c),
     }];
   });
   for (const job of jobs) await deps.draftQueue.send(job);

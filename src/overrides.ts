@@ -1,7 +1,7 @@
 /**
  * KV override plumbing. Overrides live at `override:<path>` as a JSON object
- * of field → value (fields: description, title). The site Worker's edge SEO
- * layer merges them over its computed meta on every page request, so an
+ * of field → value (fields: description, title, jsonld). The site Worker's edge
+ * SEO layer merges them over its computed meta on every page request, so an
  * approved change is live within the KV cache TTL — no deploy. Every apply
  * and revert lands in the `changes` journal.
  *
@@ -11,7 +11,135 @@
 
 import type { AgentDeps } from './deps.js';
 
-const OVERRIDE_FIELDS = new Set(['description', 'title']);
+/**
+ * The page fields an override object may carry — the single enumeration every
+ * other module gates on (createProposal's field check, the MCP tool enum, the
+ * "already live" proposal query in listFindings). A field absent from here can
+ * never reach KV: applyOverride refuses it.
+ */
+export const OVERRIDE_FIELDS = new Set(['description', 'title', 'jsonld']);
+
+// ---------------------------------------------------------------------------
+// JSON-LD (structured data), the third page field.
+//
+// The stored value is the JSON-LD document as JSON TEXT — no <script> wrapper.
+// The wrapper is the injector's job, so the same stored bytes serve whether the
+// consumer is the proxy injector, a site's own edge layer, or the wire API.
+//
+// THE STORED VALUE IS INERT BY CONSTRUCTION. `checkJsonLd` does not merely
+// validate, it RE-SERIALIZES: the text that lands in KV is JSON.stringify of
+// the parsed document with every `<` and `>` written as its \u003c / \u003e
+// escape. Those escapes are ordinary JSON — a parser yields the original
+// characters — so the document is unchanged for any reader, while the bytes
+// themselves cannot close the enclosing <script> element or open an HTML
+// comment. This is why the check is a normalizer and not a predicate: rejecting
+// "</" would leave the door open to every other spelling of the same trick
+// (`<\/script`, `<!--`, a `<` arriving from a JSON \u escape in the input), and
+// each of those would then have to be enumerated. Escaping `<` closes all of
+// them at once, and it is the standard practice for JSON in HTML.
+//
+// NO HTML ENTITIES: `&lt;` in a JSON-LD block is data, not markup — an entity
+// would change the value a parser reads. The escaping is JSON's, never HTML's.
+// ---------------------------------------------------------------------------
+
+/**
+ * Sanity bound on a stored JSON-LD document, measured on the CANONICAL
+ * serialization (the bytes actually served). Article/Organization/Product nodes
+ * are a few hundred bytes; 8 KB is room for a rich node with a long
+ * description and still small enough that it can never dominate a page's
+ * <head>. Far under the resource bound (RESOURCE_MAX_CHARS) on purpose: this
+ * one ships inline on every HTML response.
+ */
+export const JSONLD_MAX_CHARS = 8192;
+
+export type JsonLdCheck = { ok: true; value: string } | { ok: false; reason: string };
+
+/** A `@type` is usable when it is a non-blank string, or a non-empty array of them. */
+function typeReason(type: unknown): string | null {
+  if (typeof type === 'string') return type.trim() ? null : '"@type" is empty';
+  if (Array.isArray(type)) {
+    if (type.length === 0) return '"@type" is an empty array';
+    return type.every((t) => typeof t === 'string' && t.trim()) ? null : '"@type" array must hold non-empty strings';
+  }
+  return type === undefined ? 'missing "@type"' : '"@type" must be a string or an array of strings';
+}
+
+/**
+ * `@context` must point at schema.org. The value has three legal shapes — a
+ * string, an array, or an object of term definitions — so the test is on the
+ * serialized context rather than on one of them, which keeps a legitimate
+ * `["https://schema.org", {...}]` working without enumerating shapes.
+ */
+function contextReason(context: unknown): string | null {
+  if (context === undefined) return 'missing "@context"';
+  return JSON.stringify(context)?.includes('schema.org') ? null : '"@context" must reference schema.org';
+}
+
+/**
+ * Every node in the document must stand on its own — see checkJsonLd.
+ *
+ * `label` prefixes the reason so an array rejection names the offending node
+ * ("node 1: missing \"@context\""); the single-object case passes '' because
+ * there is only one thing it could be talking about. The reason is read by a
+ * human reviewing a 400, and by the model on the drafting retry turn, so
+ * "which one" is worth the four characters.
+ */
+function nodeReason(node: unknown, label: string): string | null {
+  const at = (reason: string) => (label ? `${label}: ${reason}` : reason);
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return at('must be a JSON object');
+  const o = node as Record<string, unknown>;
+  const reason = contextReason(o['@context']) ?? typeReason(o['@type']);
+  return reason ? at(reason) : null;
+}
+
+/**
+ * Validate and canonicalize a JSON-LD document. Fail-closed: every caller that
+ * can put bytes on a page (apply, manual proposal, AI draft) runs THIS, so
+ * there is one answer to "is this publishable" and one canonical form.
+ *
+ * The rules, all of them:
+ *  - parses as JSON, to an object or a non-empty array of objects;
+ *  - EVERY node carries a schema.org `@context` and a non-empty `@type`. An
+ *    array is a list of independent top-level nodes — JSON-LD gives them no
+ *    shared context — so each is checked as if it were alone. A single node
+ *    with `@graph` is the way to share one context, and that is one object,
+ *    checked once;
+ *  - the canonical serialization fits JSONLD_MAX_CHARS.
+ *
+ * On success `value` is what to store: re-serialized, with `<`/`>` escaped so
+ * the text is safe as the body of a <script> element (see the note above).
+ */
+export function checkJsonLd(text: string): JsonLdCheck {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    return { ok: false, reason: `not valid JSON (${err instanceof Error ? err.message : String(err)})` };
+  }
+  if (Array.isArray(parsed)) {
+    if (parsed.length === 0) return { ok: false, reason: 'empty array — nothing to publish' };
+    for (const [i, node] of parsed.entries()) {
+      const reason = nodeReason(node, `node ${i}`);
+      if (reason) return { ok: false, reason };
+    }
+  } else {
+    const reason = nodeReason(parsed, '');
+    if (reason) return { ok: false, reason };
+  }
+
+  const value = JSON.stringify(parsed).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
+  if (value.length > JSONLD_MAX_CHARS) {
+    return { ok: false, reason: `too long (${value.length} chars, max ${JSONLD_MAX_CHARS})` };
+  }
+  return { ok: true, value };
+}
+
+/** Why a JSON-LD document is unpublishable, or null — the shape the drafting
+ *  validators use (invalidReason / invalidTitleReason are its siblings). */
+export function invalidJsonLdReason(text: string): string | null {
+  const check = checkJsonLd(text);
+  return check.ok ? null : check.reason;
+}
 
 /**
  * THE TITLE SUFFIX CONTRACT (single source of truth — v1.15.1).
@@ -49,9 +177,21 @@ export function withTitleSuffix(value: string, suffix: string): string {
 
 /**
  * The value that actually lands in KV for a field. Only `title` carries the
- * brand suffix; a description is stored exactly as approved.
+ * brand suffix; a description is stored exactly as approved; `jsonld` is
+ * validated and re-serialized into its canonical, script-safe form.
+ *
+ * The jsonld branch THROWS on an invalid document rather than storing it. This
+ * is the fail-closed edge: applyOverride is the one path into KV for a page
+ * field, it calls this, and so nothing that fails `checkJsonLd` can ever be
+ * served — whatever validated (or failed to validate) upstream at draft or
+ * proposal time.
  */
 export function storedOverrideValue(field: string, value: string, suffix: string | undefined): string {
+  if (field === 'jsonld') {
+    const check = checkJsonLd(value);
+    if (!check.ok) throw new Error(`invalid jsonld: ${check.reason}`);
+    return check.value;
+  }
   return field === 'title' ? withTitleSuffix(value, suffix || '') : value;
 }
 

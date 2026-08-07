@@ -3,6 +3,7 @@ import {
   DESCRIPTION_RULES,
   TITLE_RULES,
   PROPOSABLE_RULES,
+  JSONLD_RULES,
   fieldForRule,
   parseTitleDetail,
   dedupeTitleSuffix,
@@ -43,13 +44,15 @@ describe('fieldForRule', () => {
     expect(fieldForRule('')).toBeNull();
   });
 
-  it('PROPOSABLE_RULES is exactly the union, and the two halves do not overlap', () => {
-    expect(PROPOSABLE_RULES.size).toBe(DESCRIPTION_RULES.size + TITLE_RULES.size);
-    for (const r of [...DESCRIPTION_RULES, ...TITLE_RULES]) expect(PROPOSABLE_RULES.has(r)).toBe(true);
+  it('PROPOSABLE_RULES is exactly the union, and the halves do not overlap', () => {
+    expect(PROPOSABLE_RULES.size).toBe(DESCRIPTION_RULES.size + TITLE_RULES.size + JSONLD_RULES.size);
+    for (const r of [...DESCRIPTION_RULES, ...TITLE_RULES, ...JSONLD_RULES]) expect(PROPOSABLE_RULES.has(r)).toBe(true);
   });
 
   it('the candidate query CASE maps the same way the function does', () => {
     for (const r of TITLE_RULES) expect(RULE_FIELD_SQL).toContain(`'${r}'`);
+    for (const r of JSONLD_RULES) expect(RULE_FIELD_SQL).toContain(`'${r}'`);
+    // The description lane is the CASE's ELSE, so its rules are never named.
     for (const r of DESCRIPTION_RULES) expect(RULE_FIELD_SQL).not.toContain(`'${r}'`);
   });
 });
