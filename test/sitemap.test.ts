@@ -142,7 +142,7 @@ type Tables = { runs: Row[]; snapshots: Row[]; proposals: Row[]; changes: Row[];
 function fakeDb(t: Tables) {
   const run = (sql: string, b: unknown[]) => {
     if (/INSERT INTO proposals/.test(sql)) {
-      const [created_at, path, field, current_value, proposed_value, rationale] = b;
+      const [created_at, , path, field, current_value, proposed_value, rationale] = b;
       const row = { id: t.proposals.length + 1, created_at, path, field, current_value, proposed_value, rationale, model: 'manual', status: 'proposed' };
       t.proposals.push(row);
       return { first: row, all: [], meta: {} };

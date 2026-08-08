@@ -1,6 +1,6 @@
 /**
  * KV override plumbing. Overrides live at `override:<path>` as a JSON object
- * of field → value (fields: description, title, jsonld, canonical). The site Worker's edge
+ * of field → value (fields: description, title, jsonld, canonical, og_image). The site Worker's edge
  * SEO layer merges them over its computed meta on every page request, so an
  * approved change is live within the KV cache TTL — no deploy. Every apply
  * and revert lands in the `changes` journal.
@@ -17,7 +17,44 @@ import type { AgentDeps } from './deps.js';
  * "already live" proposal query in listFindings). A field absent from here can
  * never reach KV: applyOverride refuses it.
  */
-export const OVERRIDE_FIELDS = new Set(['description', 'title', 'jsonld', 'canonical']);
+export const OVERRIDE_FIELDS = new Set(['description', 'title', 'jsonld', 'canonical', 'og_image']);
+
+// ---------------------------------------------------------------------------
+// Social preview image (og:image), the fifth page field.
+//
+// The stored value is an absolute image URL the injector serves as
+// `<meta property="og:image">` AND `<meta name="twitter:image">` — rewriting
+// the origin's tags when they exist, inserting them when they don't. Unlike
+// canonical there is no computable answer: the value is CHOSEN (a host UI
+// offers the site's own images, or a person types a URL) and rides the manual
+// proposal lane (createProposal), never the drafting queue.
+// ---------------------------------------------------------------------------
+
+/**
+ * Why an og:image URL is unpublishable, or null. The canonical validator's
+ * sibling with two deliberate differences: a QUERY STRING IS ALLOWED (image
+ * CDNs put size/format there — `?w=1200` names a different file, not a
+ * duplicate page) and ANY http(s) HOST is allowed (the image very often lives
+ * on a CDN, not the site). The charset rules are identical, and for the same
+ * reason: a value with no whitespace, quotes or angle brackets cannot escape
+ * the content attribute it is written into.
+ */
+export function invalidOgImageReason(value: string): string | null {
+  if (!value) return 'empty URL';
+  if (value.length > CANONICAL_MAX_CHARS) return `too long (${value.length} chars, max ${CANONICAL_MAX_CHARS})`;
+  if (/[\s"'<>\\]/.test(value)) return 'must not contain whitespace, quotes, angle brackets or backslashes';
+  // eslint-disable-next-line no-control-regex -- control characters can smuggle
+  // line breaks into anything that logs or serves the value.
+  if (/[\u0000-\u001f\u007f]/.test(value)) return 'must not contain control characters';
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return 'not an absolute URL';
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return 'must be an http(s) URL';
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // Canonical URL, the fourth page field.
@@ -245,6 +282,11 @@ export function storedOverrideValue(field: string, value: string, suffix: string
     // (or didn't) upstream at draft or proposal time.
     const reason = invalidCanonicalReason(value);
     if (reason) throw new Error(`invalid canonical: ${reason}`);
+    return value;
+  }
+  if (field === 'og_image') {
+    const reason = invalidOgImageReason(value);
+    if (reason) throw new Error(`invalid og_image: ${reason}`);
     return value;
   }
   return field === 'title' ? withTitleSuffix(value, suffix || '') : value;

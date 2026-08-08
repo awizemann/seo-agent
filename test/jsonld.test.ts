@@ -158,7 +158,7 @@ describe('checkJsonLd — </script> smuggling', () => {
 
 describe('jsonld is a first-class override field', () => {
   it('is in OVERRIDE_FIELDS alongside the copy fields', () => {
-    expect([...OVERRIDE_FIELDS].sort()).toEqual(['canonical', 'description', 'jsonld', 'title']);
+    expect([...OVERRIDE_FIELDS].sort()).toEqual(['canonical', 'description', 'jsonld', 'og_image', 'title']);
   });
 
   it('storedOverrideValue canonicalizes it, and throws rather than storing an invalid one', () => {
@@ -235,7 +235,7 @@ describe('applyOverride / revert — the jsonld lifecycle', () => {
 
   it('still refuses a field that is not overridable at all', async () => {
     await expect(
-      applyOverride(deps().deps, { path: '/a', field: 'og_image', value: 'x', oldValue: null, source: 'manual' })
+      applyOverride(deps().deps, { path: '/a', field: 'og_video', value: 'x', oldValue: null, source: 'manual' })
     ).rejects.toThrow(/field not overridable/);
   });
 });
@@ -426,11 +426,11 @@ type Tables = { proposals: Row[]; changes: Row[]; snapshots: Row[] };
 function fakeDb(t: Tables) {
   const run = (sql: string, b: unknown[]) => {
     if (/INSERT INTO proposals/.test(sql)) {
-      // The manual lane binds 7 values, the drafting lane 8 (finding_id + model).
+      // Both lanes now bind (created_at, finding_id, path, field, current,
+      // proposed, rationale[, model]) — the manual lane inlines model='manual'.
       const drafted = b.length === 8;
-      const [created_at, path, field, current_value, proposed_value, rationale, model] = drafted
-        ? [b[0], b[2], b[3], b[4], b[5], b[6], b[7]]
-        : [b[0], b[1], b[2], b[3], b[4], b[5], 'manual'];
+      const [created_at, path, field, current_value, proposed_value, rationale, model] =
+        [b[0], b[2], b[3], b[4], b[5], b[6], drafted ? b[7] : 'manual'];
       const row = { id: t.proposals.length + 1, created_at, path, field, current_value, proposed_value, rationale, model, status: 'proposed' };
       t.proposals.push(row);
       return { first: row, all: [], meta: {} };
@@ -470,7 +470,7 @@ function fakeDb(t: Tables) {
       if (c) c.reverted_at = b[0];
       return { first: null, all: [], meta: {} };
     }
-    if (/SELECT title, description(?:, canonical)? FROM page_snapshots WHERE path = \?/.test(sql)) {
+    if (/SELECT title, description\b.* FROM page_snapshots WHERE path = \?/.test(sql)) {
       return { first: t.snapshots.find((s) => s.path === b[0]) ?? null, all: [], meta: {} };
     }
     throw new Error(`fakeDb: unhandled statement: ${sql}`);

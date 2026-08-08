@@ -12,7 +12,7 @@ import { findBannedTerm, type SiteConfig } from './config.js';
 import { ingestGsc } from './gsc.js';
 import {
   applyOverride, applyResource, revertChange, isPatternSpec, mdTwinPathReason,
-  invalidCanonicalReason, invalidJsonLdReason, OVERRIDE_FIELDS, RESOURCE_FIELDS, RESOURCE_MAX_CHARS,
+  invalidCanonicalReason, invalidJsonLdReason, invalidOgImageReason, OVERRIDE_FIELDS, RESOURCE_FIELDS, RESOURCE_MAX_CHARS,
 } from './overrides.js';
 import { telemetrySummary, telemetryFindings, pruneTelemetry, rollupTelemetryWeekly, listCrawlerHits as telemetryHits } from './telemetry.js';
 import { runCitationProbes, citationFindings, citationConfig, alreadyCheckedToday } from './citations.js';
@@ -532,7 +532,7 @@ export async function decideProposal(
 
 export async function createProposal(
   deps: Pick<AgentDeps, 'db'> & Partial<Pick<AgentDeps, 'config'>>,
-  args: { path?: string; field?: string; value?: string; rationale?: string; currentValue?: string | null },
+  args: { path?: string; field?: string; value?: string; rationale?: string; currentValue?: string | null; findingId?: number | null },
   validateDescription: (text: string) => string | null
 ) {
   const field = args.field || 'description';
@@ -582,6 +582,13 @@ export async function createProposal(
     // definition of publishable structured data (checkJsonLd in overrides.ts).
     const reason = invalidJsonLdReason(args.value);
     if (reason) throw new ApiError(`invalid jsonld: ${reason}`, 400);
+  } else if (field === 'og_image') {
+    // Chosen, not computed: the manual lane is the ONLY way this field arrives
+    // (a host UI offers the site's own images, or a person supplies a URL), so
+    // this gate is the field's creation-time validation, same one applyOverride
+    // re-runs fail-closed. No banned-term check — it is a URL, not copy.
+    const reason = invalidOgImageReason(args.value);
+    if (reason) throw new ApiError(`invalid og_image: ${reason}`, 400);
   } else if (field === 'canonical') {
     // The SAME gate the deterministic drafter and applyOverride use — one
     // definition of a publishable canonical (invalidCanonicalReason in
@@ -611,20 +618,24 @@ export async function createProposal(
   if (resource) {
     currentValue = args.currentValue ?? null;
   } else {
-    const snap = await deps.db.prepare('SELECT title, description, canonical FROM page_snapshots WHERE path = ? ORDER BY id DESC LIMIT 1')
+    const snap = await deps.db.prepare('SELECT title, description, canonical, og_image FROM page_snapshots WHERE path = ? ORDER BY id DESC LIMIT 1')
       .bind(args.path)
-      .first<{ title: string | null; description: string | null; canonical: string | null }>();
-    currentValue = currentValueFor(field as 'description' | 'title' | 'jsonld' | 'canonical', {
+      .first<{ title: string | null; description: string | null; canonical: string | null; og_image: string | null }>();
+    currentValue = currentValueFor(field as 'description' | 'title' | 'jsonld' | 'canonical' | 'og_image', {
       title: snap?.title ?? null,
       description: snap?.description ?? null,
       canonical: snap?.canonical ?? null,
+      ogImage: snap?.og_image ?? null,
     });
   }
+  // finding_id makes the manual lane first-class for remediation: listFindings
+  // keys the DRAFT PENDING REVIEW chip on the proposal's finding_id, and the
+  // og_image picker is a manual proposal that very much belongs to its finding.
   const row = await deps.db.prepare(
-    `INSERT INTO proposals (created_at, path, field, current_value, proposed_value, rationale, model)
-     VALUES (?, ?, ?, ?, ?, ?, 'manual') RETURNING id`
+    `INSERT INTO proposals (created_at, finding_id, path, field, current_value, proposed_value, rationale, model)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'manual') RETURNING id`
   )
-    .bind(new Date().toISOString(), args.path, field, currentValue, args.value, args.rationale || 'manual')
+    .bind(new Date().toISOString(), args.findingId ?? null, args.path, field, currentValue, args.value, args.rationale || 'manual')
     .first<{ id: number }>();
   return { ok: true, id: row?.id, status: 'proposed' };
 }

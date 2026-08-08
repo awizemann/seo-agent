@@ -173,7 +173,7 @@ function fakeDeps() {
         return proposals.find((p) => p.field === binds[0] && p.status === 'proposed') ?? null;
       }
       if (!/INSERT INTO proposals/.test(sql)) throw new Error(`fakeDb: unhandled statement: ${sql}`);
-      const [created_at, path, field, current_value, proposed_value, rationale] = binds;
+      const [created_at, , path, field, current_value, proposed_value, rationale] = binds;
       const row = { id: proposals.length + 1, created_at, path, field, current_value, proposed_value, rationale, status: 'proposed' };
       proposals.push(row);
       return row;

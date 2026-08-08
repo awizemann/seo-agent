@@ -116,7 +116,7 @@ const TOOLS: Tool[] = [
       properties: {
         path: { type: 'string', description: 'Page path, e.g. /press' },
         value: { type: 'string', description: 'The proposed text' },
-        field: { type: 'string', enum: ['description', 'title', 'jsonld', 'canonical'], description: 'Default: description. `jsonld` takes the JSON-LD document as JSON text, with no <script> wrapper. `canonical` takes an absolute URL with no query or fragment.' },
+        field: { type: 'string', enum: ['description', 'title', 'jsonld', 'canonical', 'og_image'], description: 'Default: description. `jsonld` takes the JSON-LD document as JSON text, with no <script> wrapper. `canonical` takes an absolute URL with no query or fragment. `og_image` takes an absolute http(s) image URL (query allowed — CDNs use it).' },
         rationale: { type: 'string' },
       },
       required: ['path', 'value'],

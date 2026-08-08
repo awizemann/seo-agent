@@ -96,13 +96,16 @@ export function fieldForRule(rule: string): DraftField | null {
  * no Article node to be the "current" value.
  */
 export function currentValueFor(
-  field: DraftField,
-  snap: { title: string | null; description: string | null; canonical?: string | null }
+  field: DraftField | 'og_image',
+  snap: { title: string | null; description: string | null; canonical?: string | null; ogImage?: string | null }
 ): string | null {
   if (field === 'jsonld') return null;
   // Null for missing_canonical (there is nothing delivered), the delivered URL
   // for canonical_mismatch — which is exactly what the reviewer should compare.
   if (field === 'canonical') return snap.canonical ?? null;
+  // og_image is not a DraftField (it never rides the drafting queue — the value
+  // is chosen, not written), but the manual lane still needs its current value.
+  if (field === 'og_image') return snap.ogImage ?? null;
   return field === 'title' ? snap.title : snap.description;
 }
 
@@ -683,6 +686,11 @@ export async function draftAndCreate(
   // The canonical field is DETERMINISTIC ONLY (see CANONICAL_RULES): the value
   // is the same expression the rule checked against, and a computed URL that
   // fails validation is dropped — never handed to a model to guess at.
+  // og_image can never be drafted: there is no computable answer and a model
+  // must not invent an image URL. A job claiming that field (a bug or a forged
+  // message) is dropped, not guessed at.
+  if ((field as string) === 'og_image') return { created: false, field };
+
   let value: string | null;
   if (field === 'canonical') {
     const computed = expectedCanonicalUrl(new URL(cfg.siteUrl).origin, job.path);

@@ -6,7 +6,7 @@
  * HTMLRewriter. No changes to the origin are required.
  *
  * Contract (shared with the agent): the agent writes `override:<pathname>` →
- * JSON `{ "title"?, "description"?, "jsonld"?, "canonical"? }`; this Worker patches the
+ * JSON `{ "title"?, "description"?, "jsonld"?, "canonical"?, "og_image"? }`; this Worker patches the
  * matching tags (title + og:title + twitter:title, description +
  * og:description + twitter:description) and appends a JSON-LD <script> to the
  * <head>, only when an override exists, otherwise it proxies the origin
@@ -43,7 +43,7 @@
  * this Worker's job (see `inject`). The agent stores it already canonicalized
  * and `<`-escaped (src/overrides.ts, `checkJsonLd`).
  */
-type Override = { title?: string; description?: string; jsonld?: string; canonical?: string };
+type Override = { title?: string; description?: string; jsonld?: string; canonical?: string; og_image?: string };
 
 // Fixed allowlist of well-known resource paths — a BEFORE-origin resource
 // lookup only ever happens for these, so ordinary traffic pays no extra
@@ -246,7 +246,7 @@ async function readOverrideRemote(env: RemoteEnv, pathname: string, ctx: Executi
   }
   if (res.status !== 200) return null;
   const o = (await res.json()) as Override;
-  return o.title || o.description || o.jsonld || o.canonical ? o : null;
+  return o.title || o.description || o.jsonld || o.canonical || o.og_image ? o : null;
 }
 
 async function readOverride(env: Env, pathname: string, ctx: ExecutionContext): Promise<Override | null> {
@@ -256,7 +256,7 @@ async function readOverride(env: Env, pathname: string, ctx: ExecutionContext): 
       const raw = await kv.get(`override:${pathname || '/'}`, { cacheTtl: 300 });
       if (!raw) return null;
       const o = JSON.parse(raw) as Override;
-      return o.title || o.description || o.jsonld || o.canonical ? o : null;
+      return o.title || o.description || o.jsonld || o.canonical || o.og_image ? o : null;
     }
     if ((env as RemoteEnv).OVERRIDES_URL) return await readOverrideRemote(env as RemoteEnv, pathname, ctx);
     return null;
@@ -387,6 +387,37 @@ function inject(res: Response, o: Override): Response {
         element(el: { onEndTag(cb: (end: { before(content: string, opts: { html: boolean }): void }) => void): void }) {
           el.onEndTag((end) => {
             if (!sawCanonical) end.before(`<link rel="canonical" href="${canonical}">`, { html: true });
+          });
+        },
+      });
+  }
+  // Social preview image: the canonical lane's pattern applied to TWO tags —
+  // og:image and twitter:image are each rewritten when present and inserted
+  // when absent, with independent flags (a page may carry one and not the
+  // other). Same serve-time belt shape; the differences mirror the validator's
+  // (invalidOgImageReason): query strings allowed, any http(s) host allowed.
+  if (o.og_image && /^https?:\/\//.test(o.og_image) && !/[\s"'<>\\\u0000-\u001f\u007f]/.test(o.og_image) && o.og_image.length <= 2048) {
+    const ogImage = o.og_image;
+    let sawOg = false;
+    let sawTwitter = false;
+    rw = rw
+      .on('meta[property="og:image"]', {
+        element(el: { setAttribute(n: string, v: string): void }) {
+          sawOg = true;
+          el.setAttribute('content', ogImage);
+        },
+      })
+      .on('meta[name="twitter:image"]', {
+        element(el: { setAttribute(n: string, v: string): void }) {
+          sawTwitter = true;
+          el.setAttribute('content', ogImage);
+        },
+      })
+      .on('head', {
+        element(el: { onEndTag(cb: (end: { before(content: string, opts: { html: boolean }): void }) => void): void }) {
+          el.onEndTag((end) => {
+            if (!sawOg) end.before(`<meta property="og:image" content="${ogImage}">`, { html: true });
+            if (!sawTwitter) end.before(`<meta name="twitter:image" content="${ogImage}">`, { html: true });
           });
         },
       });

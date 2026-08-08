@@ -53,7 +53,7 @@ const MAX_OVERRIDE_KEYS = 5000;
 /** Longest value echoed into a finding detail before it gets an ellipsis. */
 const DETAIL_VALUE_MAX = 120;
 
-export type OverrideEntry = { path: string; title?: string; description?: string; canonical?: string };
+export type OverrideEntry = { path: string; title?: string; description?: string; canonical?: string; og_image?: string };
 
 /** A value as it reads in a finding detail: single-line and length-capped. */
 export function truncateValue(value: string): string {
@@ -166,6 +166,17 @@ export function verifyOverrides(entries: OverrideEntry[], snapshots: PageSnapsho
         );
       }
     }
+    if (entry.og_image) {
+      // Same exact-compare rationale as canonical: an entity-free URL written
+      // into a content attribute and read back verbatim by the crawl.
+      const expected = entry.og_image.trim();
+      const delivered = (snap.ogImage ?? '').trim();
+      if (expected && expected !== delivered) {
+        mismatches.push(
+          `og_image: expected "${truncateValue(expected)}", delivered ${snap.ogImage ? `"${truncateValue(delivered)}"` : 'nothing'}`
+        );
+      }
+    }
     if (mismatches.length === 0) continue;
 
     out.push({
@@ -202,8 +213,9 @@ export async function listPageOverrides(deps: Pick<AgentDeps, 'overrides'>): Pro
       const title = typeof parsed.title === 'string' ? parsed.title : undefined;
       const description = typeof parsed.description === 'string' ? parsed.description : undefined;
       const canonical = typeof parsed.canonical === 'string' ? parsed.canonical : undefined;
-      if (!title && !description && !canonical) continue;
-      entries.push({ path, title, description, canonical });
+      const og_image = typeof parsed.og_image === 'string' ? parsed.og_image : undefined;
+      if (!title && !description && !canonical && !og_image) continue;
+      entries.push({ path, title, description, canonical, og_image });
     }
     if (res.list_complete || !res.cursor) return entries;
     cursor = res.cursor;
