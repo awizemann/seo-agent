@@ -29,6 +29,7 @@
  */
 
 import { createProposal, ApiError } from './actions.js';
+import { originReadOrigin } from './config.js';
 import { fixedResourceSpec, RESOURCE_MAX_CHARS } from './overrides.js';
 import { ANSWER_ENGINE_BOTS, classifyTextResource, parseRobots, robotsDecision } from './aeo.js';
 import { VERSION } from './version.js';
@@ -307,8 +308,14 @@ async function headOk(url: string): Promise<boolean> {
  */
 export async function generateRobotsProposal(deps: Pick<AgentDeps, 'db' | 'config' | 'overrides'>) {
   const spec = fixedResourceSpec('robots_txt');
-  const origin = new URL(deps.config.siteUrl).origin;
-  const url = `${origin}${spec.path}`;
+  // TWO ORIGINS, and the difference is load-bearing. `readOrigin` is where the
+  // bytes are FETCHED from (the origin host when the site sits behind a proxy —
+  // see SiteConfig.originFetchBase); `siteOrigin` is the only thing that may be
+  // WRITTEN INTO the file, because a `Sitemap:` line is a public address every
+  // crawler will follow. For a site with no override they are the same string.
+  const readOrigin = originReadOrigin(deps.config);
+  const siteOrigin = new URL(deps.config.siteUrl).origin;
+  const url = `${readOrigin}${spec.path}`;
   const classify = (f: FetchedRobots) => (f.error ? 'error' : classifyTextResource(f.status, f.contentType, f.body));
 
   let fetched = await fetchRobots(url, AGENT_UA);
@@ -350,8 +357,18 @@ export async function generateRobotsProposal(deps: Pick<AgentDeps, 'db' | 'confi
     // a 404 is a broken promise to every crawler that reads it, and we are
     // already doing network I/O here, so one HEAD settles it.
     body = appendAiPolicy('User-agent: *\nAllow: /\n', ANSWER_ENGINE_BOTS);
-    const sitemap = `${origin}/sitemap.xml`;
-    if (await headOk(sitemap)) body += `\nSitemap: ${sitemap}\n`;
+    // PROBE the origin we can actually reach; PUBLISH the address a crawler
+    // can. Probing the public host on a proxied site would 522 and silently
+    // drop a Sitemap line the site really does serve.
+    //
+    // KNOWN NARROW GAP, stated rather than hidden: with an override set, this
+    // asks whether the ORIGIN serves a sitemap. A host whose proxy SERVES a
+    // sitemap the origin does not have (a managed sitemap) would see the line
+    // omitted. That is the same origin-truth bias the bypass header buys us
+    // everywhere else in this module, and it errs toward omitting a line rather
+    // than promising a file — the safe direction for robots.txt.
+    const sitemap = `${siteOrigin}/sitemap.xml`;
+    if (await headOk(`${readOrigin}/sitemap.xml`)) body += `\nSitemap: ${sitemap}\n`;
   }
 
   console.log(JSON.stringify({ evt: 'robotstxt_proposed', state, bytes: body.length }));

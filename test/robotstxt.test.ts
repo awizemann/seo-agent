@@ -163,7 +163,7 @@ describe('appendAiPolicy', () => {
 
 type Row = Record<string, unknown>;
 
-function fakeDeps() {
+function fakeDeps(cfg: Record<string, unknown> = {}) {
   const proposals: Row[] = [];
   const stmt = (sql: string, binds: unknown[] = []): any => ({
     bind: (...b: unknown[]) => stmt(sql, b),
@@ -186,7 +186,7 @@ function fakeDeps() {
     deps: {
       db: { prepare: (sql: string) => stmt(sql) },
       overrides: { get: async () => null, put: async () => {}, delete: async () => {} },
-      config: { siteUrl: 'https://example.com' },
+      config: { siteUrl: 'https://example.com', ...cfg },
     } as any,
   };
 }
@@ -352,5 +352,46 @@ describe('generateRobotsProposal', () => {
     stubFetch(() => new Response('nope', { status: 404 }), { sitemap: 404 });
     await generateRobotsProposal(d.deps);
     expect(String(d.proposals[0].proposed_value)).not.toContain('Sitemap:');
+  });
+  // --- originFetchBase: read the ORIGIN host, publish the PUBLIC one ---
+
+  it('reads /robots.txt from originFetchBase when one is set', async () => {
+    const fetchMock = stubFetch(() => ok('User-agent: *\nAllow: /\n'));
+    const d = fakeDeps({ originFetchBase: 'https://origin.example.com' });
+    await generateRobotsProposal(d.deps);
+    const urls = fetchMock.mock.calls.map((c: any) => String(c[0]));
+    expect(urls).toContain('https://origin.example.com/robots.txt');
+    expect(urls.some((u: string) => u.startsWith('https://example.com/'))).toBe(false);
+  });
+
+  it('falls back to siteUrl when no originFetchBase is set', async () => {
+    const fetchMock = stubFetch(() => ok('User-agent: *\nAllow: /\n'));
+    await generateRobotsProposal(fakeDeps().deps);
+    expect(fetchMock.mock.calls.map((c: any) => String(c[0]))).toContain('https://example.com/robots.txt');
+  });
+
+  it('probes the sitemap on the origin host but publishes the PUBLIC sitemap url', async () => {
+    const fetchMock = stubFetch(() => new Response('nope', { status: 404 }));
+    const d = fakeDeps({ originFetchBase: 'https://origin.example.com' });
+    await generateRobotsProposal(d.deps);
+    const head = fetchMock.mock.calls.find((c: any) => c[1]?.method === 'HEAD')!;
+    expect(String(head[0])).toBe('https://origin.example.com/sitemap.xml');
+    // The line a crawler will follow is the address a crawler can reach.
+    expect(String(d.proposals[0].proposed_value)).toContain('Sitemap: https://example.com/sitemap.xml');
+    expect(String(d.proposals[0].proposed_value)).not.toContain('origin.example.com');
+  });
+
+  it('omits the Sitemap line when the ORIGIN says there is no sitemap', async () => {
+    const d = fakeDeps({ originFetchBase: 'https://origin.example.com' });
+    stubFetch(() => new Response('nope', { status: 404 }), { sitemap: 404 });
+    await generateRobotsProposal(d.deps);
+    expect(String(d.proposals[0].proposed_value)).not.toContain('Sitemap:');
+  });
+
+  it('still bypasses our own override when reading through the origin host', async () => {
+    const fetchMock = stubFetch(() => ok('User-agent: *\nAllow: /\n'));
+    await generateRobotsProposal(fakeDeps({ originFetchBase: 'https://origin.example.com' }).deps);
+    const call = fetchMock.mock.calls.find((c: any) => String(c[0]) === 'https://origin.example.com/robots.txt')!;
+    expect((call[1] as any).headers['x-seo-agent-bypass']).toBe('resource');
   });
 });

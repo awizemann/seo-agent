@@ -18,7 +18,13 @@
 export type { SiteConfig, SiteVarEnv } from './config.js';
 // findBannedTerm is exported so a host embedding the library can pre-check copy
 // against the same matcher the agent enforces, instead of reimplementing \b.
-export { resolveSiteConfig, siteConfigFromEnv, parseTerms, findBannedTerm } from './config.js';
+// originReadOrigin/parseOriginFetchBase are exported for the same reason: a
+// multi-tenant host that sets ORIGIN_FETCH_BASE must be able to compute the
+// EXACT host its own SSRF guards have to gate, with no second implementation.
+export {
+  resolveSiteConfig, siteConfigFromEnv, parseTerms, findBannedTerm,
+  originReadOrigin, parseOriginFetchBase,
+} from './config.js';
 
 // ---------------------------------------------------------------------------
 // Deps — bindings + config + secrets, as data.

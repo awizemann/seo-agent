@@ -12,6 +12,30 @@
  */
 export type SiteConfig = {
   siteUrl: string;
+  /**
+   * ORIGIN READS ONLY — the base a fetch of the site's OWN bytes goes to when
+   * that is not the public site URL. Unset (the self-hoster's case, and every
+   * site not fronted by a proxy) it does not exist and everything reads
+   * `siteUrl` exactly as it always did.
+   *
+   * WHY IT EXISTS: when the site is fronted by a proxy WE run, a subrequest to
+   * the public hostname can never reach the origin — on Cloudflare a Worker
+   * subrequest to its own zone's route-attached hostname skips Workers routes
+   * entirely and lands on whatever DNS says, which for a proxied site is a
+   * placeholder (522). The origin host answers directly, and it is the same
+   * truth `x-seo-agent-bypass` was reaching for, minus the round trip.
+   *
+   * WHAT IT IS NOT: it is NEVER a source of EMITTED urls. Canonicals,
+   * expectedCanonicalUrl, sitemap `<loc>`s and llms.txt links are all public
+   * addresses and keep coming from `siteUrl`; an origin host in any of them
+   * would publish an address no visitor can use. Read `originReadOrigin(cfg)`
+   * at a fetch, `cfg.siteUrl` everywhere else.
+   *
+   * The host behind it is the CALLER's to vet — the library deliberately has no
+   * SSRF guard of its own (a self-hoster crawls their own site); a multi-tenant
+   * host must gate this host exactly as strictly as it gates the site host.
+   */
+  originFetchBase?: string;
   siteName: string;
   /** One clause describing the site, woven into the AI drafting prompt. */
   siteDescription: string;
@@ -151,6 +175,40 @@ export function clampCronDay(raw: string | undefined): number {
   return Number.isInteger(d) && d >= 0 && d <= 6 ? d : 1;
 }
 
+/**
+ * ORIGIN_FETCH_BASE, reduced to a bare origin — or undefined.
+ *
+ * FAIL-CLOSED means FALL BACK HERE, not throw: the fallback is `siteUrl`, which
+ * is the behaviour every site had before this var existed and the one the
+ * caller's guards already cover. A malformed value must never take robots.txt
+ * generation off the air for a site that was fine without it.
+ *
+ * Only http(s), and only an ORIGIN: any path, query, fragment, username or
+ * password is dropped rather than honoured, so nothing downstream can smuggle a
+ * path prefix into a URL a caller believes it built itself.
+ */
+export function parseOriginFetchBase(raw: string | undefined): string | undefined {
+  const t = (raw ?? '').trim();
+  if (!t) return undefined;
+  try {
+    const u = new URL(t);
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return undefined;
+    if (u.username || u.password) return undefined;
+    return u.origin;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The origin an ORIGIN READ fetches from: the override when one is configured,
+ * the site's own origin otherwise. Every fetch that reads the site's own bytes
+ * goes through this; nothing that EMITS a url does. See SiteConfig.originFetchBase.
+ */
+export function originReadOrigin(cfg: Pick<SiteConfig, 'siteUrl' | 'originFetchBase'>): string {
+  return cfg.originFetchBase || new URL(cfg.siteUrl).origin;
+}
+
 /** Resolve a site profile from a plain var record. Pure — no Env, no I/O. */
 export function resolveSiteConfig(vars: Record<string, string | undefined>): SiteConfig {
   const siteUrl = vars.SITE_URL ?? '';
@@ -160,8 +218,12 @@ export function resolveSiteConfig(vars: Record<string, string | undefined>): Sit
   } catch {
     throw new Error(`SITE_URL missing or invalid: "${siteUrl}"`);
   }
+  const originFetchBase = parseOriginFetchBase(vars.ORIGIN_FETCH_BASE);
   return {
     siteUrl,
+    // Spread-or-nothing: an unset override leaves the key ABSENT rather than
+    // present-and-undefined, so `'originFetchBase' in cfg` stays honest.
+    ...(originFetchBase ? { originFetchBase } : {}),
     siteName: vars.SITE_NAME || host,
     siteDescription: vars.SITE_DESCRIPTION || `the website at ${host}`,
     titleBrandSuffix: vars.TITLE_BRAND_SUFFIX || '',
@@ -204,6 +266,7 @@ export function resolveSiteConfig(vars: Record<string, string | undefined>): Sit
  */
 export type SiteVarEnv = {
   SITE_URL: string;
+  ORIGIN_FETCH_BASE?: string;
   SITE_NAME?: string;
   SITE_DESCRIPTION?: string;
   TITLE_BRAND_SUFFIX?: string;
@@ -231,6 +294,7 @@ export type SiteVarEnv = {
 export function siteConfigFromEnv(e: SiteVarEnv): SiteConfig {
   return resolveSiteConfig({
     SITE_URL: e.SITE_URL,
+    ORIGIN_FETCH_BASE: e.ORIGIN_FETCH_BASE,
     SITE_NAME: e.SITE_NAME,
     SITE_DESCRIPTION: e.SITE_DESCRIPTION,
     TITLE_BRAND_SUFFIX: e.TITLE_BRAND_SUFFIX,

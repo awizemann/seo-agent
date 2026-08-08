@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveSiteConfig, findBannedTerm } from '../src/config';
+import { resolveSiteConfig, findBannedTerm, originReadOrigin, parseOriginFetchBase } from '../src/config';
 
 const MIN = { SITE_URL: 'https://www.example.com/' };
 
@@ -203,5 +203,51 @@ describe('findBannedTerm', () => {
     // toward over-flagging rather than toward letting a term slip through.
     expect(findBannedTerm('a naïve approach', ['na'])).toBe('na');
     expect(findBannedTerm('a naive approach', ['na'])).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ORIGIN_FETCH_BASE — origin reads only, and fail-closed means "fall back".
+// ---------------------------------------------------------------------------
+
+describe('parseOriginFetchBase', () => {
+  it('reduces a valid https base to a bare origin', () => {
+    expect(parseOriginFetchBase('https://origin.example.com')).toBe('https://origin.example.com');
+    expect(parseOriginFetchBase('  https://origin.example.com/  ')).toBe('https://origin.example.com');
+  });
+
+  it('drops path, query, fragment and port survives as part of the origin', () => {
+    expect(parseOriginFetchBase('https://origin.example.com/a/b?c=1#d')).toBe('https://origin.example.com');
+    expect(parseOriginFetchBase('https://origin.example.com:8443/x')).toBe('https://origin.example.com:8443');
+  });
+
+  it('refuses credentials, non-http schemes and garbage — undefined, never a throw', () => {
+    expect(parseOriginFetchBase('https://user:pw@origin.example.com')).toBeUndefined();
+    expect(parseOriginFetchBase('file:///etc/passwd')).toBeUndefined();
+    expect(parseOriginFetchBase('javascript:alert(1)')).toBeUndefined();
+    expect(parseOriginFetchBase('origin.example.com')).toBeUndefined();
+    expect(parseOriginFetchBase('')).toBeUndefined();
+    expect(parseOriginFetchBase(undefined)).toBeUndefined();
+  });
+});
+
+describe('originFetchBase on SiteConfig', () => {
+  it('is ABSENT when the var is unset, so origin reads keep using siteUrl', () => {
+    const c = resolveSiteConfig(MIN);
+    expect('originFetchBase' in c).toBe(false);
+    expect(originReadOrigin(c)).toBe('https://www.example.com');
+  });
+
+  it('is the parsed origin when the var is set, and siteUrl is untouched', () => {
+    const c = resolveSiteConfig({ ...MIN, ORIGIN_FETCH_BASE: 'https://origin.example.com/ignored' });
+    expect(c.originFetchBase).toBe('https://origin.example.com');
+    expect(c.siteUrl).toBe('https://www.example.com/');
+    expect(originReadOrigin(c)).toBe('https://origin.example.com');
+  });
+
+  it('falls back to the site origin on a malformed var rather than throwing', () => {
+    const c = resolveSiteConfig({ ...MIN, ORIGIN_FETCH_BASE: 'not a url' });
+    expect(c.originFetchBase).toBeUndefined();
+    expect(originReadOrigin(c)).toBe('https://www.example.com');
   });
 });

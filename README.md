@@ -780,6 +780,7 @@ default or is optional. See `wrangler.example.jsonc` for the annotated template.
 | Var / secret | Required | Meaning |
 | --- | --- | --- |
 | `SITE_URL` (var) | ✓ | Origin to crawl and manage |
+| `ORIGIN_FETCH_BASE` (var) | | **Origin reads only.** Where to fetch the site's own bytes when that is not `SITE_URL` — e.g. the origin host of a site sitting behind a proxy that cannot be reached from inside the Worker. It never appears in an emitted URL (canonicals, sitemap `<loc>`s, the `Sitemap:` line): those stay on `SITE_URL`. Leave unset unless you know you need it |
 | `AGENT_TOKEN` (secret) | ✓ | Bearer token gating the API, MCP endpoint, and dashboard |
 | `SITE_NAME` (var) | | Brand/site name for the AI prompt (defaults to the hostname) |
 | `SITE_DESCRIPTION` (var) | | One clause describing the site, woven into the drafting prompt |
