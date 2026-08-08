@@ -34,6 +34,26 @@ export type AgentDeps = {
   ai: Ai;
   config: SiteConfig;
   secrets: AgentSecrets;
+  /**
+   * ORIGIN READS ONLY — HOW a fetch of the site's OWN bytes travels. Absent
+   * (the self-hoster's case, and every host with no reason to care) it is the
+   * global `fetch` and nothing changes anywhere.
+   *
+   * WHY IT IS A PORT AND NOT A URL: `SiteConfig.originFetchBase` answers WHERE
+   * an origin read goes; this answers HOW it gets there, and on Cloudflare
+   * those are genuinely two questions. A Worker subrequest to ANY hostname
+   * attached to its own zone skips Workers routes AND custom domains and
+   * connects to the placeholder DNS record — 522 — so a host whose origin is
+   * ITSELF cannot reach it over the network at all, however correct the URL
+   * is. It has to dispatch in-runtime (a service binding pointed at itself).
+   * The library cannot know any of that; it can only be handed a fetcher.
+   *
+   * CONTRACT: fetch-compatible, and used ONLY for reads of the site's own
+   * origin. Vetting what it may connect to is the caller's job, exactly as
+   * with originFetchBase — the library has no SSRF guard of its own, and
+   * deliberately should not (a self-hoster crawls their own site).
+   */
+  originFetch?: typeof fetch;
 };
 
 /**

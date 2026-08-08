@@ -388,6 +388,48 @@ describe('generateRobotsProposal', () => {
     expect(String(d.proposals[0].proposed_value)).not.toContain('Sitemap:');
   });
 
+  // ---------------------------------------------------------------- originFetch
+  // The PORT, not the URL: where the read goes is originFetchBase; HOW it
+  // travels is deps.originFetch. A host whose origin is itself (our own edge,
+  // where a same-zone subrequest 522s) hands us an in-runtime dispatcher.
+
+  it('sends every origin read through deps.originFetch when one is given', async () => {
+    const globalFetch = stubFetch(() => ok('User-agent: *\nAllow: /\n'));
+    // A MISSING robots.txt, so the synthesize branch runs and the sitemap HEAD
+    // fires — both origin reads, both of which must take the injected route.
+    const injected = vi.fn(async (_input: any, init: any = {}) => {
+      if (init?.method === 'HEAD') return new Response(null, { status: 200 });
+      return new Response('nope', { status: 404 });
+    });
+    const d = fakeDeps({ originFetchBase: 'https://origin.example.com' });
+    await generateRobotsProposal({ ...d.deps, originFetch: injected as any });
+    expect(globalFetch).not.toHaveBeenCalled();
+    const urls = injected.mock.calls.map((c: any) => String(c[0]));
+    expect(urls).toContain('https://origin.example.com/robots.txt');
+    expect(urls).toContain('https://origin.example.com/sitemap.xml');
+    // The proposal is still built from the PUBLIC address.
+    expect(String(d.proposals[0].proposed_value)).toContain('Sitemap: https://example.com/sitemap.xml');
+  });
+
+  it('uses the injected fetcher for the browser-UA retry too', async () => {
+    stubFetch(() => ok('User-agent: *\nAllow: /\n'));
+    let n = 0;
+    const injected = vi.fn(async (_input: any, init: any = {}) => {
+      if (init?.method === 'HEAD') return new Response(null, { status: 404 });
+      return ++n === 1 ? new Response('no', { status: 403 }) : ok('User-agent: *\nAllow: /\n');
+    });
+    const d = fakeDeps();
+    await generateRobotsProposal({ ...d.deps, originFetch: injected as any });
+    expect(n).toBe(2);
+    expect(String(d.proposals[0].proposed_value)).toContain(AI_POLICY_BEGIN);
+  });
+
+  it('falls back to the global fetch when no originFetch is given', async () => {
+    const globalFetch = stubFetch(() => ok('User-agent: *\nAllow: /\n'));
+    await generateRobotsProposal(fakeDeps().deps);
+    expect(globalFetch).toHaveBeenCalled();
+  });
+
   it('still bypasses our own override when reading through the origin host', async () => {
     const fetchMock = stubFetch(() => ok('User-agent: *\nAllow: /\n'));
     await generateRobotsProposal(fakeDeps({ originFetchBase: 'https://origin.example.com' }).deps);

@@ -240,9 +240,9 @@ export const BYPASS_RESOURCE = 'resource';
 const BROWSER_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 
-async function fetchRobots(url: string, userAgent: string): Promise<FetchedRobots> {
+async function fetchRobots(url: string, userAgent: string, fetchImpl: typeof fetch = fetch): Promise<FetchedRobots> {
   try {
-    const res = await fetch(url, {
+    const res = await fetchImpl(url, {
       headers: { 'user-agent': userAgent, accept: '*/*', [BYPASS_HEADER]: BYPASS_RESOURCE },
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       redirect: 'follow',
@@ -273,9 +273,9 @@ const looksLikeRules = (body: string): boolean =>
   !/^\s*(?:<!doctype|<html)/i.test(body) && /^\s*(?:user-agent|disallow|allow|sitemap)\s*:/im.test(body);
 
 /** Does this URL actually exist? One HEAD, and any failure reads as "no". */
-async function headOk(url: string): Promise<boolean> {
+async function headOk(url: string, fetchImpl: typeof fetch = fetch): Promise<boolean> {
   try {
-    const res = await fetch(url, {
+    const res = await fetchImpl(url, {
       method: 'HEAD',
       headers: { 'user-agent': AGENT_UA, accept: '*/*' },
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
@@ -306,7 +306,7 @@ async function headOk(url: string): Promise<boolean> {
  * we append to is the body a reviewer is about to publish over, and a stale one
  * would silently drop whatever the owner changed since the last run.
  */
-export async function generateRobotsProposal(deps: Pick<AgentDeps, 'db' | 'config' | 'overrides'>) {
+export async function generateRobotsProposal(deps: Pick<AgentDeps, 'db' | 'config' | 'overrides'> & Partial<Pick<AgentDeps, 'originFetch'>>) {
   const spec = fixedResourceSpec('robots_txt');
   // TWO ORIGINS, and the difference is load-bearing. `readOrigin` is where the
   // bytes are FETCHED from (the origin host when the site sits behind a proxy —
@@ -316,9 +316,12 @@ export async function generateRobotsProposal(deps: Pick<AgentDeps, 'db' | 'confi
   const readOrigin = originReadOrigin(deps.config);
   const siteOrigin = new URL(deps.config.siteUrl).origin;
   const url = `${readOrigin}${spec.path}`;
+  // HOW the origin read travels — see AgentDeps.originFetch. Every origin fetch
+  // in this function goes through it; nothing else in here reaches the network.
+  const originFetch = deps.originFetch ?? fetch;
   const classify = (f: FetchedRobots) => (f.error ? 'error' : classifyTextResource(f.status, f.contentType, f.body));
 
-  let fetched = await fetchRobots(url, AGENT_UA);
+  let fetched = await fetchRobots(url, AGENT_UA, originFetch);
   let state = classify(fetched);
   if (state === 'error') {
     // One retry as a browser. The overwhelmingly common cause of a 403 here is
@@ -327,7 +330,7 @@ export async function generateRobotsProposal(deps: Pick<AgentDeps, 'db' | 'confi
     // their edge. A retry that comes back as an HTML shell is a challenge/login
     // page, NOT a soft 404 — treating it as one would synthesize over a file we
     // still haven't read, so it stays an error.
-    const retried = await fetchRobots(url, BROWSER_UA);
+    const retried = await fetchRobots(url, BROWSER_UA, originFetch);
     const retriedState = classify(retried);
     if (retriedState === 'ok' || retriedState === 'missing' || (retriedState === 'soft_404' && looksLikeRules(retried.body))) {
       fetched = retried;
@@ -368,7 +371,7 @@ export async function generateRobotsProposal(deps: Pick<AgentDeps, 'db' | 'confi
     // everywhere else in this module, and it errs toward omitting a line rather
     // than promising a file — the safe direction for robots.txt.
     const sitemap = `${siteOrigin}/sitemap.xml`;
-    if (await headOk(`${readOrigin}/sitemap.xml`)) body += `\nSitemap: ${sitemap}\n`;
+    if (await headOk(`${readOrigin}/sitemap.xml`, originFetch)) body += `\nSitemap: ${sitemap}\n`;
   }
 
   console.log(JSON.stringify({ evt: 'robotstxt_proposed', state, bytes: body.length }));
