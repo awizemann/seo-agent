@@ -20,6 +20,29 @@ route. The one hard requirement is the KV-merge contract in
 [Connecting your site](#connecting-your-site-the-injector-side) below — everything
 else about your injector is up to you.
 
+## Hosted option
+
+Self-hosting is the first-class path and this is the whole engine: MIT, no crippled
+build, no feature held back for a paid tier. What it costs you is operations — a
+Cloudflare account on the Workers Paid plan, a Worker (plus D1, KV and a queue) per
+site you manage, your own model calls, your own upgrades when a version lands, and
+no support line when something breaks at 3am.
+
+If you'd rather not run it, [**Citeworthy**](https://citeworthy.io) is a hosted
+service built on this engine. What it adds over a self-hosted install is the part
+that isn't the engine: a managed multi-tenant edge, so one DNS record serves any
+site on any hosting platform and there is no per-site Worker to deploy; a review
+lane where every proposal is approved or edited by a human first, with a claim guard
+that refuses drafts asserting anything not on the page; d14/d28 impact verdicts from
+Search Console; AI-traffic and full-traffic analytics an on-page script can't
+collect, because crawlers don't run JavaScript; managed llms.txt, markdown twins,
+sitemaps and Article JSON-LD served from the edge; and operations — kill switch,
+probes, someone on call. There's a free tier.
+
+It's built by the same author, on this engine. The engine is not a demo of it: this
+repo is where pipeline behavior lands first, and it stays MIT. Longer write-ups of
+how the checks work are at [citeworthy.io/articles](https://citeworthy.io/articles).
+
 ## How it works
 
 Daily cron (and `POST /run` on demand):
@@ -254,29 +277,6 @@ curl -X POST "$AGENT/proposals" -H "authorization: Bearer $TOKEN" \
   -d '{"path":"/articles/caching","field":"jsonld",
        "value":"{\"@context\":\"https://schema.org\",\"@type\":\"Article\",\"headline\":\"How caching works\"}"}'
 ```
-
-## Hosted option
-
-Self-hosting is the first-class path and this is the whole engine: MIT, no crippled
-build, no feature held back for a paid tier. What it costs you is operations — a
-Cloudflare account on the Workers Paid plan, a Worker (plus D1, KV and a queue) per
-site you manage, your own model calls, your own upgrades when a version lands, and
-no support line when something breaks at 3am.
-
-If you'd rather not run it, [**Citeworthy**](https://citeworthy.io) is a hosted
-service built on this engine. What it adds over a self-hosted install is the part
-that isn't the engine: a managed multi-tenant edge, so one DNS record serves any
-site on any hosting platform and there is no per-site Worker to deploy; a review
-lane where every proposal is approved or edited by a human first, with a claim guard
-that refuses drafts asserting anything not on the page; d14/d28 impact verdicts from
-Search Console; AI-traffic and full-traffic analytics an on-page script can't
-collect, because crawlers don't run JavaScript; managed llms.txt, markdown twins,
-sitemaps and Article JSON-LD served from the edge; and operations — kill switch,
-probes, someone on call. There's a free tier.
-
-It's built by the same author, on this engine. The engine is not a demo of it: this
-repo is where pipeline behavior lands first, and it stays MIT. Longer write-ups of
-how the checks work are at [citeworthy.io/articles](https://citeworthy.io/articles).
 
 ## Google Search Console sensing (optional but recommended)
 
