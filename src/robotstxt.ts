@@ -45,7 +45,7 @@ export const AI_POLICY_BEGIN = '# --- AI crawler policy (managed by seo-agent) -
 export const AI_POLICY_END = '# --- end AI crawler policy ---';
 
 const FETCH_TIMEOUT_MS = 15_000;
-const AGENT_UA = `seo-agent/${VERSION} (aeo-audit; +https://github.com/awizemann/seo-agent)`;
+const AGENT_UA = `seo-agent/${VERSION} (aeo-audit; +https://github.com/citeworthyio/seo-agent)`;
 
 /** A marker line, ignoring indentation and the CR of a CRLF file. */
 const isMarker = (line: string, marker: string): boolean => line.replace(/\r$/, '').trim() === marker;

@@ -16,7 +16,7 @@ import type { AgentDeps } from './deps.js';
 import { BYPASS_HEADER, BYPASS_RESOURCE } from './robotstxt.js';
 import { VERSION } from './version.js';
 
-const USER_AGENT = `seo-agent/${VERSION} (self-audit; +https://github.com/awizemann/seo-agent)`;
+const USER_AGENT = `seo-agent/${VERSION} (self-audit; +https://github.com/citeworthyio/seo-agent)`;
 
 /**
  * DISCOVERY MUST READ THE ORIGIN'S SITEMAP, NEVER OUR OWN (v1.19.1).

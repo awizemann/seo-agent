@@ -102,7 +102,7 @@ edge injector able to read KV overrides (see [below](#connecting-your-site-the-i
 
 ```sh
 # 1. Clone and install
-git clone https://github.com/awizemann/seo-agent && cd seo-agent
+git clone https://github.com/citeworthyio/seo-agent && cd seo-agent
 npm install
 
 # 2. Create the Cloudflare resources
@@ -135,7 +135,7 @@ Using Claude Code (or any coding agent with shell + wrangler access)? Paste this
 prompt, answer its three questions, and a working setup lands in about ten minutes:
 
 ```text
-Set up https://github.com/awizemann/seo-agent as the SEO/AEO agent for my site.
+Set up https://github.com/citeworthyio/seo-agent as the SEO/AEO agent for my site.
 
 Ask me these three things before you start (don't guess):
 1. SITE_URL — the site to manage. A sitemap.xml is strongly preferred; without one
@@ -845,7 +845,7 @@ tag, and import the TypeScript source from the package root — which resolves t
 
 ```jsonc
 // your package.json
-"dependencies": { "seo-agent": "github:awizemann/seo-agent#v1.9.0" }
+"dependencies": { "seo-agent": "github:citeworthyio/seo-agent#v1.9.0" }
 ```
 
 ```ts

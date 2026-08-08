@@ -209,7 +209,7 @@ async function fetchText(url: string, userAgent: string): Promise<Fetched> {
   }
 }
 
-const AGENT_UA = `seo-agent/${VERSION} (aeo-audit; +https://github.com/awizemann/seo-agent)`;
+const AGENT_UA = `seo-agent/${VERSION} (aeo-audit; +https://github.com/citeworthyio/seo-agent)`;
 
 export async function aeoChecks(cfg: SiteConfig, snapshots: PageSnapshot[]): Promise<Triggered[]> {
   if (!cfg.aeoChecks) return [];
